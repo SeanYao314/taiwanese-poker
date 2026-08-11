@@ -1,0 +1,13 @@
+{
+  "name": "taiwanese-poker",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer Taiwanese Poker (1/2/4-card hands run against two 5-card boards)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}
