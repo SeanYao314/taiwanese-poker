@@ -1,0 +1,10 @@
+HR round 3: 20/120 hands solved (40.6s elapsed)
+HR round 3: 40/120 hands solved (80.7s elapsed)
+HR round 3: 60/120 hands solved (120.0s elapsed)
+HR round 3: 80/120 hands solved (159.7s elapsed)
+HR round 3: 100/120 hands solved (199.1s elapsed)
+HR round 3: 120/120 hands solved (239.3s elapsed)
+HR round 3 done in 239.3s -> round3_hr.json
+
+sample (pool id 0, cards 8s 4c 3h 7h 7s 5c 6d):
+  chosen split: 1:[8s]  2:[4c 5c]  4:[3h 7h 7s 6d]   EV=-3.150
