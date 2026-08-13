@@ -174,13 +174,18 @@
           <button id="btnPracticeNewHand" class="primary">New Hand</button>
         </div>
       </div>
-      <p class="hint" style="margin-top:-6px;">Standard scoring, vs. a pre-solved near-optimal opponent, averaged over <span id="practiceHintTrials">150</span> board runouts per split.</p>
+      <p class="hint" style="margin-top:-6px;">Vs. a pre-solved near-optimal opponent, averaged over <span id="practiceHintTrials">150</span> board runouts per split.</p>
 
       <div class="practice-trials-control">
         <label for="practiceTrialsRange">Boards per split: <span id="practiceTrialsValue">150</span></label>
         <input type="range" id="practiceTrialsRange" min="100" max="1000" step="50" value="150" />
         <span class="hint-inline">More boards = less noise, but "Show Ideal Split" takes longer. Applies on your next New Hand.</span>
       </div>
+
+      <label class="checkbox-label practice-homerun-toggle">
+        <input type="checkbox" id="practiceHomerunToggle" />
+        <span>Homerun scoring <span class="hint-inline">(sweep all 6 comparisons vs this opponent &mdash; both boards, all 3 hands, no ties &mdash; and the match total doubles, 12&rarr;24. Applies instantly. Note: the opponent's own split is still solved for standard rules, since that's the pool available.)</span></span>
+      </label>
 
       <div class="slots" id="practiceSlots">
         <div class="slot" data-slot="one">
@@ -211,7 +216,7 @@
 
       <div id="practiceIdealPanel" class="practice-ideal-panel hidden">
         <div class="practice-ideal-headline">
-          🏆 Ideal split for this hand <span class="hint-inline">(best of all 105 ways to split it, checked against these same 150 boards)</span>
+          🏆 Ideal split for this hand <span class="hint-inline">(best of all 105 ways to split it, checked against these same boards)</span>
         </div>
         <div id="practiceIdealCards" class="practice-ideal-cards"></div>
         <div class="practice-ideal-footer">
@@ -226,6 +231,7 @@
           <span id="practiceEvTotal" class="pscore"></span> pts/hand
         </div>
         <div id="practiceEvBreakdown" class="practice-ev-breakdown"></div>
+        <p id="practiceHomerunRate" class="practice-homerun-rate hidden"></p>
       </div>
 
       <h3>Saved Splits <span class="hint-inline">(same 150 boards used for every split, so these are directly comparable)</span></h3>

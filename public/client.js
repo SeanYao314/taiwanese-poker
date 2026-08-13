@@ -693,6 +693,10 @@
   const PRACTICE_TRIALS_MAX = 1000;
   const PRACTICE_TRIALS_DEFAULT = 150;
   let practiceTrialTarget = PRACTICE_TRIALS_DEFAULT; // takes effect on the next dealt hand
+  // Unlike the trial count, this applies instantly (it's just a different lens on the
+  // same trial data, not a re-deal) and persists as a sticky setting across New Hand
+  // clicks until the user changes it.
+  let practiceHomerunMode = false;
   const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
   let opponentPool = null; // cached after first fetch
   let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
@@ -846,11 +850,21 @@
     return cat === 'four' ? window.Poker.bestPLO(cards, board) : window.Poker.bestGeneric(cards, board);
   }
 
+  // Matches lib/game.js's rule exactly: sweeping all 6 comparisons against this one
+  // opponent (both boards, all 3 hand sizes, no ties anywhere) doubles the match total
+  // for that trial, 12 -> 24 (or -24 if you're the one swept). The opponent's split
+  // itself is still the standard-solved one from opponent-pool.json — homerun mode
+  // changes how a given trial gets scored, not who you're playing against.
+  const PRACTICE_MATCH_TOTAL = (PRACTICE_POINTS.one + PRACTICE_POINTS.two + PRACTICE_POINTS.four) * 2;
+
   // Score `assignment` against one trial's fixed opponent + boards. Returns the point
-  // swing for each of the 6 (category, board) cells plus the total.
-  function scoreTrial(assignment, trial) {
+  // swing for each of the 6 (category, board) cells, the total, and whether this trial
+  // was a homerun (for either side) once homerunMode's bonus is folded in.
+  function scoreTrial(assignment, trial, homerunMode) {
     const cells = { one: [0, 0], two: [0, 0], four: [0, 0] };
     let total = 0;
+    let allWon = true;
+    let allLost = true;
     ['one', 'two', 'four'].forEach((cat) => {
       [trial.boardA, trial.boardB].forEach((board, bi) => {
         const mine = evalHandOnBoard(assignment[cat], board, cat);
@@ -860,41 +874,53 @@
         const delta = cmp > 0 ? pts : cmp < 0 ? -pts : 0;
         cells[cat][bi] = delta;
         total += delta;
+        if (delta <= 0) allWon = false;
+        if (delta >= 0) allLost = false;
       });
     });
-    return { total, cells };
+    let homerun = null;
+    if (homerunMode) {
+      if (allWon) { total += PRACTICE_MATCH_TOTAL; homerun = 'win'; }
+      else if (allLost) { total -= PRACTICE_MATCH_TOTAL; homerun = 'loss'; }
+    }
+    return { total, cells, homerun };
   }
 
-  // Runs the current arrangement through all 150 trials — cheap, pure client-side
+  // Runs the current arrangement through all trials — cheap, pure client-side
   // evaluate5() calls, no network — so this can fire on every completed arrangement.
-  function evalAssignmentAcrossTrials(assignment, trials) {
+  function evalAssignmentAcrossTrials(assignment, trials, homerunMode) {
     let sumTotal = 0;
     const sumCells = { one: [0, 0], two: [0, 0], four: [0, 0] };
+    let homerunWins = 0;
+    let homerunLosses = 0;
     trials.forEach((trial) => {
-      const r = scoreTrial(assignment, trial);
+      const r = scoreTrial(assignment, trial, homerunMode);
       sumTotal += r.total;
       ['one', 'two', 'four'].forEach((cat) => {
         sumCells[cat][0] += r.cells[cat][0];
         sumCells[cat][1] += r.cells[cat][1];
       });
+      if (r.homerun === 'win') homerunWins++;
+      else if (r.homerun === 'loss') homerunLosses++;
     });
     const n = trials.length;
     const avgCells = {};
     ['one', 'two', 'four'].forEach((cat) => {
       avgCells[cat] = [sumCells[cat][0] / n, sumCells[cat][1] / n];
     });
-    return { avgTotal: sumTotal / n, avgCells };
+    return { avgTotal: sumTotal / n, avgCells, homerunWins, homerunLosses, n };
   }
 
   function fmtEv(n) { return (n > 0 ? '+' : '') + n.toFixed(2); }
 
   function runPracticeEval() {
-    const { avgTotal, avgCells } = evalAssignmentAcrossTrials(practice.assignment, practice.trials);
-    practice.lastEv = { avgTotal, avgCells };
-    renderPracticeEV(avgTotal, avgCells);
+    const result = evalAssignmentAcrossTrials(practice.assignment, practice.trials, practiceHomerunMode);
+    practice.lastEv = result;
+    renderPracticeEV(result);
   }
 
-  function renderPracticeEV(avgTotal, avgCells) {
+  function renderPracticeEV(result) {
+    const { avgTotal, avgCells, homerunWins, homerunLosses, n } = result;
     el('practiceTrialCount').textContent = practice.trials.length;
     const totalSpan = el('practiceEvTotal');
     totalSpan.textContent = fmtEv(avgTotal);
@@ -917,6 +943,14 @@
       });
       breakdown.appendChild(row);
     });
+
+    const hrLine = el('practiceHomerunRate');
+    if (practiceHomerunMode && n) {
+      hrLine.innerHTML = `⚾ Homerun rate: you swept <span class="pcell pos">${homerunWins}/${n}</span> boards &middot; opponent swept <span class="pcell neg">${homerunLosses}/${n}</span> boards`;
+      hrLine.classList.remove('hidden');
+    } else {
+      hrLine.classList.add('hidden');
+    }
 
     el('practiceEvPanel').classList.remove('hidden');
   }
@@ -948,7 +982,7 @@
   // the browser tab appearing to hang (and risking a "page unresponsive" prompt). So this
   // processes trials in small batches via setTimeout(0), yielding control back to the
   // browser between batches and reporting progress, instead of doing it all in one go.
-  function findIdealSplitAsync(hand, trials, onProgress) {
+  function findIdealSplitAsync(hand, trials, homerunMode, onProgress) {
     return new Promise((resolve) => {
       const Poker = window.Poker;
       const partitions = allPartitions(hand);
@@ -987,7 +1021,9 @@
             const fourB = Poker.bestPLO(four, trial.boardB).score;
             const cmpA = Poker.compareScores(fourA, oc.four[0]);
             const cmpB = Poker.compareScores(fourB, oc.four[1]);
-            const fourPts = (cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0) + (cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0);
+            const d4a = cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0;
+            const d4b = cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0;
+            const fourPts = d4a + d4b;
             for (const idx of members) {
               const part = partitions[idx];
               const oneA = Poker.bestGeneric(part.one, trial.boardA).score;
@@ -998,8 +1034,19 @@
               const c1b = Poker.compareScores(oneB, oc.one[1]);
               const c2a = Poker.compareScores(twoA, oc.two[0]);
               const c2b = Poker.compareScores(twoB, oc.two[1]);
-              const pts = (c1a > 0 ? 1 : c1a < 0 ? -1 : 0) + (c1b > 0 ? 1 : c1b < 0 ? -1 : 0)
-                + (c2a > 0 ? 2 : c2a < 0 ? -2 : 0) + (c2b > 0 ? 2 : c2b < 0 ? -2 : 0) + fourPts;
+              const d1a = c1a > 0 ? 1 : c1a < 0 ? -1 : 0;
+              const d1b = c1b > 0 ? 1 : c1b < 0 ? -1 : 0;
+              const d2a = c2a > 0 ? 2 : c2a < 0 ? -2 : 0;
+              const d2b = c2b > 0 ? 2 : c2b < 0 ? -2 : 0;
+              let pts = d1a + d1b + d2a + d2b + fourPts;
+              // A split that sets up more clean sweeps can beat a higher-raw-EV split once
+              // the homerun bonus is on, so this has to be part of the search objective
+              // itself, not just applied after the fact to whichever partition wins on raw
+              // points.
+              if (homerunMode) {
+                if (d1a > 0 && d1b > 0 && d2a > 0 && d2b > 0 && d4a > 0 && d4b > 0) pts += PRACTICE_MATCH_TOTAL;
+                else if (d1a < 0 && d1b < 0 && d2a < 0 && d2b < 0 && d4a < 0 && d4b < 0) pts -= PRACTICE_MATCH_TOTAL;
+              }
               totals[idx] += pts;
             }
           }
@@ -1015,11 +1062,11 @@
             if (totals[i] > totals[bestIdx]) bestIdx = i;
           }
           const bestPartition = partitions[bestIdx];
-          // Re-derive the same {avgTotal, avgCells} shape the rest of the UI expects, via
-          // the standard (now single-partition, so cheap) evaluator — guarantees the
-          // displayed number matches exactly what re-running that split manually would show.
-          const { avgTotal, avgCells } = evalAssignmentAcrossTrials(bestPartition, trials);
-          resolve({ assignment: bestPartition, avgTotal, avgCells });
+          // Re-derive the same result shape the rest of the UI expects, via the standard
+          // (now single-partition, so cheap) evaluator — guarantees the displayed number
+          // matches exactly what re-running that split manually would show.
+          const result = evalAssignmentAcrossTrials(bestPartition, trials, homerunMode);
+          resolve({ assignment: bestPartition, ...result });
         }
       }
 
@@ -1056,7 +1103,7 @@
     const btn = el('btnPracticeIdeal');
     btn.disabled = true;
     btn.textContent = 'Calculating… 0%';
-    practice.ideal = await findIdealSplitAsync(practice.hand, practice.trials, (frac) => {
+    practice.ideal = await findIdealSplitAsync(practice.hand, practice.trials, practiceHomerunMode, (frac) => {
       btn.textContent = `Calculating… ${Math.round(frac * 100)}%`;
     });
     btn.disabled = false;
@@ -1166,6 +1213,37 @@
     practiceTrialTarget = Number(el('practiceTrialsRange').value);
     el('practiceTrialsValue').textContent = practiceTrialTarget;
     el('practiceHintTrials').textContent = practiceTrialTarget;
+  });
+
+  el('practiceHomerunToggle').addEventListener('change', () => {
+    practiceHomerunMode = el('practiceHomerunToggle').checked;
+    if (!practice) return;
+
+    // The "ideal" split can differ under homerun scoring (it's a different objective —
+    // see findIdealSplitAsync), so any cached answer is stale. Don't auto-recompute
+    // (that's the slow multi-second operation); just clear it and let the user re-ask.
+    practice.ideal = null;
+    el('practiceIdealPanel').classList.add('hidden');
+    const idealBtn = el('btnPracticeIdeal');
+    idealBtn.disabled = false;
+    idealBtn.textContent = 'Show Ideal Split';
+
+    // Re-score is cheap (same trial data, just a different scoring lens), so this can
+    // safely happen instantly for both the live arrangement and everything saved so far.
+    const complete = practiceTrayCards().length === 0
+      && practice.assignment.one.length === 1
+      && practice.assignment.two.length === 2
+      && practice.assignment.four.length === 4;
+    if (complete) runPracticeEval();
+
+    practice.saved.forEach((s) => {
+      const r = evalAssignmentAcrossTrials(s.assignment, practice.trials, practiceHomerunMode);
+      s.avgTotal = r.avgTotal;
+      s.avgCells = r.avgCells;
+      s.homerunWins = r.homerunWins;
+      s.homerunLosses = r.homerunLosses;
+    });
+    renderPracticeSaved();
   });
 
   // ---------- shared room state ----------

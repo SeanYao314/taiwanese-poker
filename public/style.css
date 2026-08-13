@@ -356,6 +356,16 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   100% { transform: scale(1); }
 }
 
+.practice-homerun-toggle { margin-bottom: 18px; }
+
+.practice-homerun-rate {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  font-size: .85rem;
+  font-weight: 600;
+}
+
 .practice-trials-control {
   display: flex;
   align-items: center;
