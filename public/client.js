@@ -224,7 +224,7 @@
       });
     }
 
-    document.querySelectorAll('.slot').forEach((slotDiv) => {
+    document.querySelectorAll('#screen-game .slot').forEach((slotDiv) => {
       slotDiv.onclick = (ev) => {
         if (disabled) return;
         const slot = slotDiv.dataset.slot;
@@ -660,6 +660,319 @@
   el('btnNextHand').addEventListener('click', async () => {
     const res = await api('/api/next_hand', { code: state.code, playerId: state.playerId, token: state.token });
     if (res && !res.ok) alert(res.error);
+  });
+
+  // ---------- practice mode ----------
+  // Entirely client-side after the initial pool fetch: no server round-trip per redo.
+  // The "opponent" for each of the 150 trials is a (hand, split) pair pulled from
+  // opponent-pool.json — hands whose blind split was solved offline via the iterative
+  // best-response bootstrap documented in experiments/solve/. Re-arranging your own
+  // hand re-scores instantly against the SAME 150 trials, so EV differences between
+  // your attempts are directly comparable (no fresh variance each redo).
+  const PRACTICE_TRIALS = 150;
+  const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
+  let opponentPool = null; // cached after first fetch
+  let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
+
+  async function loadOpponentPool() {
+    if (opponentPool) return opponentPool;
+    const res = await fetch('/opponent-pool.json');
+    opponentPool = await res.json();
+    return opponentPool;
+  }
+
+  function shuffleArray(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function buildPracticeTrials(playerHand, pool) {
+    const playerSet = new Set(playerHand);
+    const qualifying = pool.filter((entry) => {
+      const oppHand = [...entry.one, ...entry.two, ...entry.four];
+      return oppHand.every((c) => !playerSet.has(c));
+    });
+
+    let chosen;
+    if (qualifying.length >= PRACTICE_TRIALS) {
+      chosen = shuffleArray(qualifying).slice(0, PRACTICE_TRIALS);
+    } else {
+      // Extremely unlikely (expected ~300+ qualify out of 1120), but fall back to
+      // sampling with replacement rather than ever reusing a card within a trial.
+      chosen = [];
+      for (let i = 0; i < PRACTICE_TRIALS; i++) {
+        chosen.push(qualifying[Math.floor(Math.random() * qualifying.length)] || pool[i % pool.length]);
+      }
+    }
+
+    return chosen.map((entry) => {
+      const oppHand = [...entry.one, ...entry.two, ...entry.four];
+      const oppSet = new Set([...playerHand, ...oppHand]);
+      const remaining = shuffleArray(window.Poker.freshDeck().filter((c) => !oppSet.has(c)));
+      const boardA = remaining.slice(0, 5);
+      const boardB = remaining.slice(5, 10);
+      return { oppSplit: entry, boardA, boardB };
+    });
+  }
+
+  async function startPractice() {
+    hide('screen-landing');
+    show('screen-practice');
+    el('practiceEvPanel').classList.add('hidden');
+    el('practiceSlots').querySelectorAll('.slot-cards').forEach((n) => (n.innerHTML = ''));
+    el('pTray').innerHTML = '<div class="hint">Loading opponent pool…</div>';
+
+    const pool = await loadOpponentPool();
+    const hand = window.Poker.shuffle(window.Poker.freshDeck()).slice(0, 7);
+    const trials = buildPracticeTrials(hand, pool);
+
+    practice = {
+      hand,
+      trials,
+      assignment: { one: [], two: [], four: [] },
+      selectedCard: null,
+      saved: []
+    };
+    renderPracticeArranger();
+    renderPracticeSaved();
+  }
+
+  function practiceTrayCards() {
+    const used = new Set([...practice.assignment.one, ...practice.assignment.two, ...practice.assignment.four]);
+    return practice.hand.filter((c) => !used.has(c));
+  }
+
+  function renderPracticeArranger() {
+    hide('practiceError');
+    ['one', 'two', 'four'].forEach((slot) => {
+      const container = el('pSlot' + capitalize(slot));
+      container.innerHTML = '';
+      practice.assignment[slot].forEach((c) => {
+        const cardNode = cardEl(c);
+        cardNode.addEventListener('click', () => {
+          practice.assignment[slot] = practice.assignment[slot].filter((x) => x !== c);
+          practice.selectedCard = null;
+          renderPracticeArranger();
+        });
+        container.appendChild(cardNode);
+      });
+    });
+
+    const tray = el('pTray');
+    tray.innerHTML = '';
+    practiceTrayCards().forEach((c) => {
+      const cardNode = cardEl(c);
+      if (practice.selectedCard === c) cardNode.classList.add('selected');
+      cardNode.addEventListener('click', () => {
+        practice.selectedCard = practice.selectedCard === c ? null : c;
+        renderPracticeArranger();
+      });
+      tray.appendChild(cardNode);
+    });
+
+    document.querySelectorAll('#practiceSlots .slot').forEach((slotDiv) => {
+      slotDiv.onclick = () => {
+        const slot = slotDiv.dataset.slot;
+        if (!practice.selectedCard) return;
+        if (practice.assignment[slot].length >= CAPACITY[slot]) return;
+        practice.assignment[slot].push(practice.selectedCard);
+        practice.selectedCard = null;
+        renderPracticeArranger();
+      };
+    });
+
+    const complete = practiceTrayCards().length === 0
+      && practice.assignment.one.length === 1
+      && practice.assignment.two.length === 2
+      && practice.assignment.four.length === 4;
+    el('btnPracticeSave').disabled = !complete;
+
+    if (complete) {
+      runPracticeEval();
+    } else {
+      el('practiceEvPanel').classList.add('hidden');
+    }
+  }
+
+  el('btnPracticeClear').addEventListener('click', () => {
+    if (!practice) return;
+    practice.assignment = { one: [], two: [], four: [] };
+    practice.selectedCard = null;
+    renderPracticeArranger();
+  });
+
+  function evalHandOnBoard(cards, board, cat) {
+    return cat === 'four' ? window.Poker.bestPLO(cards, board) : window.Poker.bestGeneric(cards, board);
+  }
+
+  // Score `assignment` against one trial's fixed opponent + boards. Returns the point
+  // swing for each of the 6 (category, board) cells plus the total.
+  function scoreTrial(assignment, trial) {
+    const cells = { one: [0, 0], two: [0, 0], four: [0, 0] };
+    let total = 0;
+    ['one', 'two', 'four'].forEach((cat) => {
+      [trial.boardA, trial.boardB].forEach((board, bi) => {
+        const mine = evalHandOnBoard(assignment[cat], board, cat);
+        const theirs = evalHandOnBoard(trial.oppSplit[cat], board, cat);
+        const cmp = window.Poker.compareScores(mine.score, theirs.score);
+        const pts = PRACTICE_POINTS[cat];
+        const delta = cmp > 0 ? pts : cmp < 0 ? -pts : 0;
+        cells[cat][bi] = delta;
+        total += delta;
+      });
+    });
+    return { total, cells };
+  }
+
+  // Runs the current arrangement through all 150 trials — cheap, pure client-side
+  // evaluate5() calls, no network — so this can fire on every completed arrangement.
+  function evalAssignmentAcrossTrials(assignment, trials) {
+    let sumTotal = 0;
+    const sumCells = { one: [0, 0], two: [0, 0], four: [0, 0] };
+    trials.forEach((trial) => {
+      const r = scoreTrial(assignment, trial);
+      sumTotal += r.total;
+      ['one', 'two', 'four'].forEach((cat) => {
+        sumCells[cat][0] += r.cells[cat][0];
+        sumCells[cat][1] += r.cells[cat][1];
+      });
+    });
+    const n = trials.length;
+    const avgCells = {};
+    ['one', 'two', 'four'].forEach((cat) => {
+      avgCells[cat] = [sumCells[cat][0] / n, sumCells[cat][1] / n];
+    });
+    return { avgTotal: sumTotal / n, avgCells };
+  }
+
+  function fmtEv(n) { return (n > 0 ? '+' : '') + n.toFixed(2); }
+
+  function runPracticeEval() {
+    const { avgTotal, avgCells } = evalAssignmentAcrossTrials(practice.assignment, practice.trials);
+    practice.lastEv = { avgTotal, avgCells };
+    renderPracticeEV(avgTotal, avgCells);
+  }
+
+  function renderPracticeEV(avgTotal, avgCells) {
+    el('practiceTrialCount').textContent = practice.trials.length;
+    const totalSpan = el('practiceEvTotal');
+    totalSpan.textContent = fmtEv(avgTotal);
+    totalSpan.className = 'pscore ' + (avgTotal > 0 ? 'pos' : avgTotal < 0 ? 'neg' : '');
+
+    const breakdown = el('practiceEvBreakdown');
+    breakdown.innerHTML = '';
+    ['one', 'two', 'four'].forEach((cat) => {
+      const row = document.createElement('div');
+      row.className = 'pcat-row';
+      const label = document.createElement('div');
+      label.className = 'pcat-label';
+      label.textContent = SLOT_TITLES[cat];
+      row.appendChild(label);
+      [0, 1].forEach((bi) => {
+        const v = avgCells[cat][bi];
+        const cell = document.createElement('div');
+        cell.innerHTML = `<span class="pcell-sub">${bi === 0 ? 'Board A' : 'Board B'}: </span><span class="pcell ${v > 0 ? 'pos' : v < 0 ? 'neg' : 'even'}">${fmtEv(v)}</span>`;
+        row.appendChild(cell);
+      });
+      breakdown.appendChild(row);
+    });
+
+    el('practiceEvPanel').classList.remove('hidden');
+  }
+
+  el('btnPracticeSave').addEventListener('click', () => {
+    if (!practice || !practice.lastEv) return;
+    const key = fmtAssignmentKey(practice.assignment);
+    if (practice.saved.some((s) => s.key === key)) {
+      el('practiceError').textContent = "You've already saved this exact split.";
+      show('practiceError');
+      return;
+    }
+    hide('practiceError');
+    practice.saved.push({
+      key,
+      assignment: deepCopy(practice.assignment),
+      avgTotal: practice.lastEv.avgTotal,
+      avgCells: practice.lastEv.avgCells
+    });
+    renderPracticeSaved();
+  });
+
+  function fmtAssignmentKey(a) {
+    return ['one', 'two', 'four'].map((c) => c + ':' + [...a[c]].sort().join(',')).join('|');
+  }
+
+  function renderPracticeSaved() {
+    const list = el('practiceSaved');
+    list.innerHTML = '';
+    if (!practice || practice.saved.length === 0) {
+      show('practiceSavedEmpty');
+      return;
+    }
+    hide('practiceSavedEmpty');
+
+    const sorted = [...practice.saved].sort((a, b) => b.avgTotal - a.avgTotal);
+    sorted.forEach((s, i) => {
+      const item = document.createElement('div');
+      item.className = 'practice-saved-item' + (i === 0 ? ' best' : '');
+
+      const rank = document.createElement('div');
+      rank.className = 'psi-rank';
+      rank.textContent = '#' + (i + 1);
+      item.appendChild(rank);
+
+      const cardsWrap = document.createElement('div');
+      cardsWrap.className = 'psi-cards';
+      const catShortLabel = { one: '1:', two: '2:', four: '4:' };
+      ['one', 'two', 'four'].forEach((cat) => {
+        const group = document.createElement('span');
+        group.className = 'psi-group';
+        const lbl = document.createElement('span');
+        lbl.className = 'hc-label';
+        lbl.textContent = catShortLabel[cat];
+        group.appendChild(lbl);
+        group.appendChild(cardRow(s.assignment[cat], { size: 'small' }));
+        cardsWrap.appendChild(group);
+      });
+      item.appendChild(cardsWrap);
+
+      const ev = document.createElement('div');
+      ev.className = 'psi-ev ' + (s.avgTotal > 0 ? 'pos' : s.avgTotal < 0 ? 'neg' : '');
+      ev.textContent = fmtEv(s.avgTotal) + ' EV';
+      item.appendChild(ev);
+
+      const actions = document.createElement('div');
+      actions.className = 'psi-actions';
+      const loadBtn = document.createElement('button');
+      loadBtn.textContent = 'Load';
+      loadBtn.addEventListener('click', () => {
+        practice.assignment = deepCopy(s.assignment);
+        practice.selectedCard = null;
+        renderPracticeArranger();
+      });
+      const removeBtn = document.createElement('button');
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        practice.saved = practice.saved.filter((x) => x.key !== s.key);
+        renderPracticeSaved();
+      });
+      actions.appendChild(loadBtn);
+      actions.appendChild(removeBtn);
+      item.appendChild(actions);
+
+      list.appendChild(item);
+    });
+  }
+
+  el('btnPracticeStart').addEventListener('click', () => { startPractice(); });
+  el('btnPracticeNewHand').addEventListener('click', () => { startPractice(); });
+  el('btnPracticeBack').addEventListener('click', () => {
+    hide('screen-practice');
+    show('screen-landing');
   });
 
   // ---------- shared room state ----------

@@ -323,6 +323,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Serve the hand evaluator straight from lib/ so Practice Mode's client-side EV
+  // math (150 board runouts per redo, no server round-trip) runs the exact same
+  // code as the server — no separate browser port to keep in sync.
+  if (pathname === '/lib/poker.js' && req.method === 'GET') {
+    fs.readFile(path.join(__dirname, 'lib', 'poker.js'), (err, data) => {
+      if (err) { res.writeHead(404); res.end('Not found'); return; }
+      res.writeHead(200, { 'Content-Type': MIME['.js'] });
+      res.end(data);
+    });
+    return;
+  }
+
   if (pathname.startsWith('/api/') && req.method === 'POST') {
     const handler = API_HANDLERS[pathname];
     if (!handler) { json(res, 404, { ok: false, error: 'Unknown endpoint.' }); return; }

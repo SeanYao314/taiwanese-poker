@@ -356,6 +356,65 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   100% { transform: scale(1); }
 }
 
+.practice-ev-panel {
+  background: #f6f7f9;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 18px 0;
+}
+.practice-ev-headline { font-weight: 700; font-size: 1.05rem; margin-bottom: 10px; }
+.practice-ev-headline .pscore.pos { color: #1a7f37; }
+.practice-ev-headline .pscore.neg { color: var(--danger); }
+.practice-ev-breakdown .pcat-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 1fr;
+  gap: 12px;
+  padding: 6px 0;
+  border-top: 1px solid #e5e7eb;
+  align-items: center;
+  font-size: .85rem;
+}
+.practice-ev-breakdown .pcat-row:first-child { border-top: none; }
+.practice-ev-breakdown .pcat-label { font-weight: 700; }
+.practice-ev-breakdown .pcell { font-weight: 700; }
+.practice-ev-breakdown .pcell.pos { color: #1a7f37; }
+.practice-ev-breakdown .pcell.neg { color: var(--danger); }
+.practice-ev-breakdown .pcell.even { color: var(--muted); }
+.practice-ev-breakdown .pcell-sub { color: var(--muted); font-weight: 500; font-size: .78rem; }
+
+.practice-saved-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 8px; }
+.practice-saved-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.practice-saved-item.best { border-color: var(--accent); background: #fffdf5; }
+.practice-saved-item .psi-cards { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.practice-saved-item .psi-group { display: flex; align-items: center; gap: 4px; }
+.practice-saved-item .psi-ev { font-weight: 800; font-size: 1.05rem; min-width: 80px; }
+.practice-saved-item .psi-ev.pos { color: #1a7f37; }
+.practice-saved-item .psi-ev.neg { color: var(--danger); }
+.practice-saved-item .psi-actions { display: flex; gap: 6px; }
+.practice-saved-item .psi-actions button {
+  border: none;
+  background: #eef0f2;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-weight: 700;
+  font-size: .78rem;
+  cursor: pointer;
+}
+.practice-saved-item .psi-rank {
+  font-weight: 800;
+  color: var(--muted);
+  min-width: 22px;
+}
+
 .scoreboard { width: 100%; border-collapse: collapse; margin-top: 8px; }
 .scoreboard th, .scoreboard td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eef0f2; }
 .scoreboard th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }

@@ -31,6 +31,11 @@ produced this project. All scripts are plain `node <script>.js <args>`, no build
   change or just noise between near-tied options.
 - `analyze.js` — convergence report across `round1.json`...`round5.json` (% of hands that
   changed their chosen split each round, mean EV per round, sample trajectories).
+- `build_opponent_pool.js` — merges `round1000_standard.json` + `round5.json` into
+  `../../public/opponent-pool.json`, the flat (hand, split) array the live site's
+  **Practice Mode** loads in-browser to play against. Re-run this (`node
+  build_opponent_pool.js > ../../public/opponent-pool.json`) any time those source pools
+  are regenerated.
 
 ## What's saved here (from the actual runs)
 

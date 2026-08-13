@@ -24,6 +24,7 @@
       <div class="tabs">
         <button class="tab-btn active" data-tab="create">Create Room</button>
         <button class="tab-btn" data-tab="join">Join Room</button>
+        <button class="tab-btn" data-tab="practice">Practice</button>
       </div>
 
       <div id="tab-create" class="tab-content">
@@ -52,6 +53,18 @@
           <input id="joinCode" type="text" maxlength="4" placeholder="e.g. K7Q2" style="text-transform:uppercase" />
         </label>
         <button id="btnJoin" class="primary">Join Room</button>
+      </div>
+
+      <div id="tab-practice" class="tab-content hidden">
+        <p class="hint" style="margin-top:0;">
+          Solo mode — no room needed. You get a random 7-card hand and try different ways
+          to split it. Each split is scored against 150 independent board runouts, each
+          against an opponent hand drawn from a pool pre-solved by iterative best-response
+          simulation (see the strategy research in this project's README) — a strong,
+          empirically near-optimal opponent, not a random one. Try a split, see its average
+          EV, tweak it, and compare. Standard scoring only (no homerun).
+        </p>
+        <button id="btnPracticeStart" class="primary">Start Practice</button>
       </div>
 
       <p id="landingError" class="error hidden"></p>
@@ -151,8 +164,61 @@
     </div>
   </section>
 
+  <!-- PRACTICE MODE -->
+  <section id="screen-practice" class="screen hidden">
+    <div class="card-panel wide">
+      <div class="game-header">
+        <h2>Practice Mode</h2>
+        <div class="actions" style="width:auto;">
+          <button id="btnPracticeBack" class="secondary">Back to Menu</button>
+          <button id="btnPracticeNewHand" class="primary">New Hand</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:-6px;">Standard scoring, vs. a pre-solved near-optimal opponent, averaged over 150 board runouts per split.</p>
+
+      <div class="slots" id="practiceSlots">
+        <div class="slot" data-slot="one">
+          <div class="slot-title">1-Card Hand <span class="pt">worth 1 pt / board</span></div>
+          <div class="slot-cards" id="pSlotOne"></div>
+        </div>
+        <div class="slot" data-slot="two">
+          <div class="slot-title">2-Card Hand <span class="pt">worth 2 pt / board</span></div>
+          <div class="slot-cards" id="pSlotTwo"></div>
+        </div>
+        <div class="slot" data-slot="four">
+          <div class="slot-title">4-Card PLO Hand <span class="pt">worth 3 pt / board</span></div>
+          <div class="slot-cards" id="pSlotFour"></div>
+        </div>
+      </div>
+
+      <div class="tray-wrap">
+        <div class="slot-title">Your Cards <span class="hint-inline">(click a card, then click a hand above)</span></div>
+        <div class="tray" id="pTray"></div>
+      </div>
+
+      <div class="actions">
+        <button id="btnPracticeClear" class="secondary">Clear</button>
+        <button id="btnPracticeSave" class="primary" disabled>Save This Split</button>
+      </div>
+      <p id="practiceError" class="error hidden"></p>
+
+      <div id="practiceEvPanel" class="practice-ev-panel hidden">
+        <div class="practice-ev-headline">
+          Average EV over <span id="practiceTrialCount"></span> boards:
+          <span id="practiceEvTotal" class="pscore"></span> pts/hand
+        </div>
+        <div id="practiceEvBreakdown" class="practice-ev-breakdown"></div>
+      </div>
+
+      <h3>Saved Splits <span class="hint-inline">(same 150 boards used for every split, so these are directly comparable)</span></h3>
+      <div id="practiceSaved" class="practice-saved-list"></div>
+      <p id="practiceSavedEmpty" class="hint">No splits saved yet — try an arrangement above, then click "Save This Split."</p>
+    </div>
+  </section>
+
 </main>
 
+<script src="/lib/poker.js"></script>
 <script src="client.js"></script>
 </body>
 </html>

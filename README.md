@@ -53,6 +53,14 @@ Rooms and scores live in server memory only — restarting the server clears eve
 
 Cards render with a **4-color deck** (♠ black, ♥ red, ♦ blue, ♣ green) so all four suits are easy to tell apart at a glance — colors are defined in `public/style.css` (`--suit-spade`/`--suit-heart`/`--suit-diamond`/`--suit-club`) if you'd rather use the traditional red/black 2-color scheme.
 
+## Practice Mode (solo, no room needed)
+
+The landing page's **Practice** tab drops you straight into a single-player training screen — no room, no other players. You're dealt one random 7-card hand and try different ways to split it; each split is scored against **150 independent board runouts**, every one against an opponent hand pulled from a pool that was pre-solved offline via the iterative best-response bootstrap in `experiments/solve/` (see below) — a strong, empirically near-equilibrium opponent, not a random one.
+
+Rearranging your cards and re-running is instant: the same evaluator that scores live games (`lib/poker.js`) is served straight to the browser at `/lib/poker.js` and runs entirely client-side, so there's no server round-trip per attempt. Critically, every split you try during a session is scored against the exact same 150 (opponent, boards) trials — generated once when the hand is dealt — so the EV numbers are directly comparable to each other; the difference between two splits' EV isn't muddied by fresh Monte Carlo noise each time. Save a split to build up a leaderboard of your attempts on that hand, sorted by EV, with one-click reload to keep tweaking a promising one.
+
+The opponent pool itself ships as `public/opponent-pool.json`, built by `experiments/solve/build_opponent_pool.js` from `round1000_standard.json` + `round5.json` (1120 pre-solved hands total). Practice Mode is standard-scoring only — the opponent pool was solved under standard rules, and re-labeling it as "optimal" under homerun scoring would overstate what's actually been validated (see the homerun section above for why).
+
 ## Deploying so friends can join over the internet
 
 Because there's nothing to `npm install`, deployment is about as simple as it gets. A few good free/cheap options:
@@ -107,11 +115,14 @@ This folder has a set of standalone Node scripts (no dependencies beyond `lib/po
 ## Project structure
 
 ```
-server.js            HTTP server: static file hosting + room/game API + SSE push
-lib/poker.js          5-card hand evaluator, deck/shuffle, hand-construction rules
-lib/game.js            Dealing, assignment validation, scoring across all players
-public/index.html      App shell (landing / lobby / arranging / results screens)
-public/style.css       Styling
-public/client.js       Client logic: fetch() for actions, EventSource for live updates
-tests/poker.test.js    Dependency-free sanity tests (run with `node tests/poker.test.js`)
+server.js               HTTP server: static file hosting + room/game API + SSE push
+lib/poker.js             5-card hand evaluator, deck/shuffle, hand-construction rules
+                         (UMD-wrapped — also served directly to the browser for Practice Mode)
+lib/game.js              Dealing, assignment validation, scoring across all players
+public/index.html        App shell (landing / lobby / arranging / results / practice screens)
+public/style.css         Styling
+public/client.js         Client logic: fetch() for actions, EventSource for live updates,
+                         plus Practice Mode's client-side EV engine
+public/opponent-pool.json Pre-solved (hand, split) pairs powering Practice Mode's opponent
+tests/poker.test.js      Dependency-free sanity tests (run with `node tests/poker.test.js`)
 ```
