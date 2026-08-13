@@ -174,7 +174,13 @@
           <button id="btnPracticeNewHand" class="primary">New Hand</button>
         </div>
       </div>
-      <p class="hint" style="margin-top:-6px;">Standard scoring, vs. a pre-solved near-optimal opponent, averaged over 150 board runouts per split.</p>
+      <p class="hint" style="margin-top:-6px;">Standard scoring, vs. a pre-solved near-optimal opponent, averaged over <span id="practiceHintTrials">150</span> board runouts per split.</p>
+
+      <div class="practice-trials-control">
+        <label for="practiceTrialsRange">Boards per split: <span id="practiceTrialsValue">150</span></label>
+        <input type="range" id="practiceTrialsRange" min="100" max="1000" step="50" value="150" />
+        <span class="hint-inline">More boards = less noise, but "Show Ideal Split" takes longer. Applies on your next New Hand.</span>
+      </div>
 
       <div class="slots" id="practiceSlots">
         <div class="slot" data-slot="one">

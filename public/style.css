@@ -356,6 +356,20 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   100% { transform: scale(1); }
 }
 
+.practice-trials-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #f6f7f9;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+}
+.practice-trials-control label { display: inline; margin: 0; font-size: .85rem; font-weight: 700; color: var(--ink); white-space: nowrap; }
+.practice-trials-control input[type="range"] { width: 180px; margin: 0; accent-color: var(--felt); }
+.practice-trials-control .hint-inline { color: var(--muted); }
+
 .practice-ideal-panel {
   background: #fffdf5;
   border: 1px solid #f0d488;

@@ -684,12 +684,15 @@
 
   // ---------- practice mode ----------
   // Entirely client-side after the initial pool fetch: no server round-trip per redo.
-  // The "opponent" for each of the 150 trials is a (hand, split) pair pulled from
-  // opponent-pool.json — hands whose blind split was solved offline via the iterative
-  // best-response bootstrap documented in experiments/solve/. Re-arranging your own
-  // hand re-scores instantly against the SAME 150 trials, so EV differences between
-  // your attempts are directly comparable (no fresh variance each redo).
-  const PRACTICE_TRIALS = 150;
+  // The "opponent" for each trial is a (hand, split) pair pulled from opponent-pool.json —
+  // hands whose blind split was solved offline via the iterative best-response bootstrap
+  // documented in experiments/solve/. Re-arranging your own hand re-scores instantly
+  // against the SAME set of trials, so EV differences between your attempts are directly
+  // comparable (no fresh variance each redo).
+  const PRACTICE_TRIALS_MIN = 100;
+  const PRACTICE_TRIALS_MAX = 1000;
+  const PRACTICE_TRIALS_DEFAULT = 150;
+  let practiceTrialTarget = PRACTICE_TRIALS_DEFAULT; // takes effect on the next dealt hand
   const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
   let opponentPool = null; // cached after first fetch
   let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
@@ -710,7 +713,7 @@
     return a;
   }
 
-  function buildPracticeTrials(playerHand, pool) {
+  function buildPracticeTrials(playerHand, pool, trialCount) {
     const playerSet = new Set(playerHand);
     const qualifying = pool.filter((entry) => {
       const oppHand = [...entry.one, ...entry.two, ...entry.four];
@@ -718,13 +721,16 @@
     });
 
     let chosen;
-    if (qualifying.length >= PRACTICE_TRIALS) {
-      chosen = shuffleArray(qualifying).slice(0, PRACTICE_TRIALS);
+    if (qualifying.length >= trialCount) {
+      chosen = shuffleArray(qualifying).slice(0, trialCount);
     } else {
-      // Extremely unlikely (expected ~300+ qualify out of 1120), but fall back to
-      // sampling with replacement rather than ever reusing a card within a trial.
+      // The pre-solved opponent pool only has ~1120 hands total, and roughly a third of
+      // those qualify (don't share a card with yours) for any given hand — comfortably
+      // enough for the default 150, but requesting close to the 1000 max will exceed the
+      // qualifying pool, so opponents start repeating (with fresh boards each trial).
+      // Still zero risk of a duplicate card within any single trial.
       chosen = [];
-      for (let i = 0; i < PRACTICE_TRIALS; i++) {
+      for (let i = 0; i < trialCount; i++) {
         chosen.push(qualifying[Math.floor(Math.random() * qualifying.length)] || pool[i % pool.length]);
       }
     }
@@ -748,7 +754,7 @@
 
     const pool = await loadOpponentPool();
     const hand = window.Poker.shuffle(window.Poker.freshDeck()).slice(0, 7);
-    const trials = buildPracticeTrials(hand, pool);
+    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget);
 
     practice = {
       hand,
@@ -937,69 +943,88 @@
     return partitions;
   }
 
-  function findIdealSplit(hand, trials) {
-    const Poker = window.Poker;
-    const partitions = allPartitions(hand);
+  // Cost scales with trial count (up to 1000, per the board-count slider), and at the
+  // top end this is ~25s of raw work — too long to run as one synchronous block without
+  // the browser tab appearing to hang (and risking a "page unresponsive" prompt). So this
+  // processes trials in small batches via setTimeout(0), yielding control back to the
+  // browser between batches and reporting progress, instead of doing it all in one go.
+  function findIdealSplitAsync(hand, trials, onProgress) {
+    return new Promise((resolve) => {
+      const Poker = window.Poker;
+      const partitions = allPartitions(hand);
 
-    const oppCache = trials.map((trial) => ({
-      one: [
-        evalHandOnBoard(trial.oppSplit.one, trial.boardA, 'one').score,
-        evalHandOnBoard(trial.oppSplit.one, trial.boardB, 'one').score
-      ],
-      two: [
-        evalHandOnBoard(trial.oppSplit.two, trial.boardA, 'two').score,
-        evalHandOnBoard(trial.oppSplit.two, trial.boardB, 'two').score
-      ],
-      four: [
-        evalHandOnBoard(trial.oppSplit.four, trial.boardA, 'four').score,
-        evalHandOnBoard(trial.oppSplit.four, trial.boardB, 'four').score
-      ]
-    }));
+      const fourGroups = new Map();
+      partitions.forEach((part, idx) => {
+        const key = [...part.four].sort().join(',');
+        if (!fourGroups.has(key)) fourGroups.set(key, { four: part.four, members: [] });
+        fourGroups.get(key).members.push(idx);
+      });
 
-    const fourGroups = new Map();
-    partitions.forEach((part, idx) => {
-      const key = [...part.four].sort().join(',');
-      if (!fourGroups.has(key)) fourGroups.set(key, { four: part.four, members: [] });
-      fourGroups.get(key).members.push(idx);
-    });
+      const totals = new Float64Array(partitions.length);
+      const CHUNK = 5; // trials per tick — small enough to keep the tab responsive
+      let ti = 0;
 
-    const totals = new Float64Array(partitions.length);
-    for (let ti = 0; ti < trials.length; ti++) {
-      const oc = oppCache[ti];
-      const trial = trials[ti];
-      for (const { four, members } of fourGroups.values()) {
-        const fourA = Poker.bestPLO(four, trial.boardA).score;
-        const fourB = Poker.bestPLO(four, trial.boardB).score;
-        const cmpA = Poker.compareScores(fourA, oc.four[0]);
-        const cmpB = Poker.compareScores(fourB, oc.four[1]);
-        const fourPts = (cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0) + (cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0);
-        for (const idx of members) {
-          const part = partitions[idx];
-          const oneA = Poker.bestGeneric(part.one, trial.boardA).score;
-          const oneB = Poker.bestGeneric(part.one, trial.boardB).score;
-          const twoA = Poker.bestGeneric(part.two, trial.boardA).score;
-          const twoB = Poker.bestGeneric(part.two, trial.boardB).score;
-          const c1a = Poker.compareScores(oneA, oc.one[0]);
-          const c1b = Poker.compareScores(oneB, oc.one[1]);
-          const c2a = Poker.compareScores(twoA, oc.two[0]);
-          const c2b = Poker.compareScores(twoB, oc.two[1]);
-          const pts = (c1a > 0 ? 1 : c1a < 0 ? -1 : 0) + (c1b > 0 ? 1 : c1b < 0 ? -1 : 0)
-            + (c2a > 0 ? 2 : c2a < 0 ? -2 : 0) + (c2b > 0 ? 2 : c2b < 0 ? -2 : 0) + fourPts;
-          totals[idx] += pts;
+      function step() {
+        const end = Math.min(ti + CHUNK, trials.length);
+        for (; ti < end; ti++) {
+          const trial = trials[ti];
+          const oc = {
+            one: [
+              evalHandOnBoard(trial.oppSplit.one, trial.boardA, 'one').score,
+              evalHandOnBoard(trial.oppSplit.one, trial.boardB, 'one').score
+            ],
+            two: [
+              evalHandOnBoard(trial.oppSplit.two, trial.boardA, 'two').score,
+              evalHandOnBoard(trial.oppSplit.two, trial.boardB, 'two').score
+            ],
+            four: [
+              evalHandOnBoard(trial.oppSplit.four, trial.boardA, 'four').score,
+              evalHandOnBoard(trial.oppSplit.four, trial.boardB, 'four').score
+            ]
+          };
+          for (const { four, members } of fourGroups.values()) {
+            const fourA = Poker.bestPLO(four, trial.boardA).score;
+            const fourB = Poker.bestPLO(four, trial.boardB).score;
+            const cmpA = Poker.compareScores(fourA, oc.four[0]);
+            const cmpB = Poker.compareScores(fourB, oc.four[1]);
+            const fourPts = (cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0) + (cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0);
+            for (const idx of members) {
+              const part = partitions[idx];
+              const oneA = Poker.bestGeneric(part.one, trial.boardA).score;
+              const oneB = Poker.bestGeneric(part.one, trial.boardB).score;
+              const twoA = Poker.bestGeneric(part.two, trial.boardA).score;
+              const twoB = Poker.bestGeneric(part.two, trial.boardB).score;
+              const c1a = Poker.compareScores(oneA, oc.one[0]);
+              const c1b = Poker.compareScores(oneB, oc.one[1]);
+              const c2a = Poker.compareScores(twoA, oc.two[0]);
+              const c2b = Poker.compareScores(twoB, oc.two[1]);
+              const pts = (c1a > 0 ? 1 : c1a < 0 ? -1 : 0) + (c1b > 0 ? 1 : c1b < 0 ? -1 : 0)
+                + (c2a > 0 ? 2 : c2a < 0 ? -2 : 0) + (c2b > 0 ? 2 : c2b < 0 ? -2 : 0) + fourPts;
+              totals[idx] += pts;
+            }
+          }
+        }
+
+        if (onProgress) onProgress(ti / trials.length);
+
+        if (ti < trials.length) {
+          setTimeout(step, 0);
+        } else {
+          let bestIdx = 0;
+          for (let i = 1; i < partitions.length; i++) {
+            if (totals[i] > totals[bestIdx]) bestIdx = i;
+          }
+          const bestPartition = partitions[bestIdx];
+          // Re-derive the same {avgTotal, avgCells} shape the rest of the UI expects, via
+          // the standard (now single-partition, so cheap) evaluator — guarantees the
+          // displayed number matches exactly what re-running that split manually would show.
+          const { avgTotal, avgCells } = evalAssignmentAcrossTrials(bestPartition, trials);
+          resolve({ assignment: bestPartition, avgTotal, avgCells });
         }
       }
-    }
 
-    let bestIdx = 0;
-    for (let i = 1; i < partitions.length; i++) {
-      if (totals[i] > totals[bestIdx]) bestIdx = i;
-    }
-    const bestPartition = partitions[bestIdx];
-    // Re-derive the same {avgTotal, avgCells} shape the rest of the UI expects, via the
-    // standard (now single-partition, so cheap) evaluator — guarantees the displayed
-    // number matches exactly what re-running that split manually would show.
-    const { avgTotal, avgCells } = evalAssignmentAcrossTrials(bestPartition, trials);
-    return { assignment: bestPartition, avgTotal, avgCells };
+      step();
+    });
   }
 
   function renderPracticeIdeal(ideal) {
@@ -1024,23 +1049,19 @@
     el('practiceIdealPanel').classList.remove('hidden');
   }
 
-  el('btnPracticeIdeal').addEventListener('click', () => {
+  el('btnPracticeIdeal').addEventListener('click', async () => {
     if (!practice) return;
     if (practice.ideal) { renderPracticeIdeal(practice.ideal); return; }
 
     const btn = el('btnPracticeIdeal');
     btn.disabled = true;
-    btn.textContent = 'Calculating… (checking all 105 splits)';
-    // Defer so the "Calculating…" label actually paints before the ~1-4s synchronous
-    // search runs (this blocks the main thread — there's no free lunch for exhaustive
-    // search in a single-threaded browser tab, but a few seconds for a one-off "show me
-    // the answer" click is a reasonable trade for exactness over the full 150 boards).
-    setTimeout(() => {
-      practice.ideal = findIdealSplit(practice.hand, practice.trials);
-      btn.disabled = false;
-      btn.textContent = 'Show Ideal Split';
-      renderPracticeIdeal(practice.ideal);
-    }, 30);
+    btn.textContent = 'Calculating… 0%';
+    practice.ideal = await findIdealSplitAsync(practice.hand, practice.trials, (frac) => {
+      btn.textContent = `Calculating… ${Math.round(frac * 100)}%`;
+    });
+    btn.disabled = false;
+    btn.textContent = 'Show Ideal Split';
+    renderPracticeIdeal(practice.ideal);
   });
 
   el('btnPracticeLoadIdeal').addEventListener('click', () => {
@@ -1139,6 +1160,12 @@
   el('btnPracticeBack').addEventListener('click', () => {
     hide('screen-practice');
     show('screen-landing');
+  });
+
+  el('practiceTrialsRange').addEventListener('input', () => {
+    practiceTrialTarget = Number(el('practiceTrialsRange').value);
+    el('practiceTrialsValue').textContent = practiceTrialTarget;
+    el('practiceHintTrials').textContent = practiceTrialTarget;
   });
 
   // ---------- shared room state ----------
