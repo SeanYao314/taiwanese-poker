@@ -59,6 +59,8 @@ The landing page's **Practice** tab drops you straight into a single-player trai
 
 Rearranging your cards and re-running is instant: the same evaluator that scores live games (`lib/poker.js`) is served straight to the browser at `/lib/poker.js` and runs entirely client-side, so there's no server round-trip per attempt. Critically, every split you try during a session is scored against the exact same 150 (opponent, boards) trials — generated once when the hand is dealt — so the EV numbers are directly comparable to each other; the difference between two splits' EV isn't muddied by fresh Monte Carlo noise each time. Save a split to build up a leaderboard of your attempts on that hand, sorted by EV, with one-click reload to keep tweaking a promising one.
 
+Stuck, or just want to check your work? **Show Ideal Split** exhaustively scores all 105 ways to split your 7 cards against those same 150 trials and shows you the best one, with a "Load Ideal Split" button to drop it straight into your slots. This is a real (if brute-force) search, not a heuristic — it takes a few seconds since it's checking 105 splits × 150 boards on the main thread of your browser tab, but it's exact given the trial set, and it's cached per hand so asking again is instant.
+
 The opponent pool itself ships as `public/opponent-pool.json`, built by `experiments/solve/build_opponent_pool.js` from `round1000_standard.json` + `round5.json` (1120 pre-solved hands total). Practice Mode is standard-scoring only — the opponent pool was solved under standard rules, and re-labeling it as "optimal" under homerun scoring would overstate what's actually been validated (see the homerun section above for why).
 
 ## Deploying so friends can join over the internet

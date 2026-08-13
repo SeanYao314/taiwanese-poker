@@ -198,9 +198,21 @@
 
       <div class="actions">
         <button id="btnPracticeClear" class="secondary">Clear</button>
+        <button id="btnPracticeIdeal" class="secondary">Show Ideal Split</button>
         <button id="btnPracticeSave" class="primary" disabled>Save This Split</button>
       </div>
       <p id="practiceError" class="error hidden"></p>
+
+      <div id="practiceIdealPanel" class="practice-ideal-panel hidden">
+        <div class="practice-ideal-headline">
+          🏆 Ideal split for this hand <span class="hint-inline">(best of all 105 ways to split it, checked against these same 150 boards)</span>
+        </div>
+        <div id="practiceIdealCards" class="practice-ideal-cards"></div>
+        <div class="practice-ideal-footer">
+          <span>Average EV: <span id="practiceIdealEv" class="pscore"></span> pts/hand</span>
+          <button id="btnPracticeLoadIdeal" class="secondary">Load Ideal Split</button>
+        </div>
+      </div>
 
       <div id="practiceEvPanel" class="practice-ev-panel hidden">
         <div class="practice-ev-headline">

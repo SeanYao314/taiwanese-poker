@@ -356,6 +356,19 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   100% { transform: scale(1); }
 }
 
+.practice-ideal-panel {
+  background: #fffdf5;
+  border: 1px solid #f0d488;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 18px 0;
+}
+.practice-ideal-headline { font-weight: 700; margin-bottom: 10px; }
+.practice-ideal-cards { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 12px; }
+.practice-ideal-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; font-weight: 600; }
+.practice-ideal-footer .pscore.pos { color: #1a7f37; }
+.practice-ideal-footer .pscore.neg { color: var(--danger); }
+
 .practice-ev-panel {
   background: #f6f7f9;
   border-radius: 12px;
