@@ -718,6 +718,17 @@
     const t = (Math.log10(trials) - logMin) / (logMax - logMin);
     return Math.round(t * PRACTICE_SLIDER_STEPS);
   }
+
+  // "Show Ideal Split" has its own separate board-count slider (same 100-10,000 log range
+  // and the same helpers above) instead of always riding on the EV panel's slider — the
+  // ideal split search is far more expensive per board (105 partitions vs. 1), so someone
+  // running 10,000 boards through the EV panel usually still wants the search itself to
+  // stay fast, but they can dial it up if they want a slower, more precise search. It's
+  // sticky (unlike the EV slider, it applies immediately, not just on New Hand) and gets
+  // clamped down to however many boards this hand actually has if set higher than that.
+  const PRACTICE_IDEAL_TRIALS_DEFAULT = 1000;
+  let practiceIdealTrialTarget = PRACTICE_IDEAL_TRIALS_DEFAULT;
+
   // Unlike the trial count, this applies instantly (it's just a different lens on the
   // same trial data, not a re-deal) and persists as a sticky setting across New Hand
   // clicks until the user changes it.
@@ -1024,15 +1035,6 @@
     return partitions;
   }
 
-  // The board-count slider goes up to 10,000, but the "ideal split" answer itself barely
-  // moves past ~1000 boards — at that point the estimate has converged enough that more
-  // trials just burn time without changing which of the 105 partitions comes out on top.
-  // So this search always caps itself at PRACTICE_IDEAL_MAX_TRIALS regardless of the
-  // slider, using the first N of the session's trials (still the same shared trial set
-  // used everywhere else, just truncated) — keeps the search itself well under render-
-  // freezing territory even when the EV/variance panel above is crunching 10,000 boards.
-  const PRACTICE_IDEAL_MAX_TRIALS = 1000;
-
   function findIdealSplitAsync(hand, trials, homerunMode, onProgress) {
     return new Promise((resolve) => {
       const Poker = window.Poker;
@@ -1108,16 +1110,22 @@
         if (ti < trials.length) {
           setTimeout(step, 0);
         } else {
-          let bestIdx = 0;
-          for (let i = 1; i < partitions.length; i++) {
-            if (totals[i] > totals[bestIdx]) bestIdx = i;
-          }
-          const bestPartition = partitions[bestIdx];
+          // Rank all 105 partitions by total score and keep the top 3 — the winner, plus
+          // the next 2 runner-ups (shown collapsed in the UI, mostly to satisfy curiosity
+          // about how close the field was, e.g. whether the "ideal" split is a clear
+          // standout or basically tied with a couple of close alternatives).
+          const rankedIdx = partitions.map((_, i) => i).sort((a, b) => totals[b] - totals[a]);
+          const bestPartition = partitions[rankedIdx[0]];
           // Re-derive the same result shape the rest of the UI expects, via the standard
           // (now single-partition, so cheap) evaluator — guarantees the displayed number
-          // matches exactly what re-running that split manually would show.
+          // matches exactly what re-running that split manually would show. Same for each
+          // runner-up.
           const result = evalAssignmentAcrossTrials(bestPartition, trials, homerunMode);
-          resolve({ assignment: bestPartition, ...result });
+          const runnersUp = rankedIdx.slice(1, 3).map((idx) => {
+            const partition = partitions[idx];
+            return { assignment: partition, ...evalAssignmentAcrossTrials(partition, trials, homerunMode) };
+          });
+          resolve({ assignment: bestPartition, ...result, runnersUp });
         }
       }
 
@@ -1144,20 +1152,75 @@
     evSpan.textContent = fmtEv(ideal.avgTotal);
     evSpan.className = 'pscore ' + (ideal.avgTotal > 0 ? 'pos' : ideal.avgTotal < 0 ? 'neg' : '');
 
-    // The search itself always caps at PRACTICE_IDEAL_MAX_TRIALS boards even if the
-    // slider above is set higher, so make that explicit whenever it actually kicked in —
+    // The search runs against however many boards the "Ideal split search boards" slider
+    // asked for, clamped down to however many this hand actually has (from the main EV
+    // slider at deal time). Make that explicit whenever the clamp actually kicked in —
     // otherwise "Average EV" here and the EV panel's own number are silently over
     // different-sized (if overlapping) trial sets.
     const noteEl = el('practiceIdealTrialNote');
     if (noteEl) {
       if (ideal.n < practice.trials.length) {
-        noteEl.textContent = `(checked against the first ${ideal.n.toLocaleString()} of your ${practice.trials.length.toLocaleString()} boards — the ideal split stops changing well before that many, so it's capped for speed)`;
+        noteEl.textContent = `(checked against ${ideal.n.toLocaleString()} of your ${practice.trials.length.toLocaleString()} boards, per the search slider below)`;
       } else {
         noteEl.textContent = '(checked against these same boards)';
       }
     }
 
+    renderPracticeRunnersUp(ideal.runnersUp || []);
+
     el('practiceIdealPanel').classList.remove('hidden');
+  }
+
+  // Renders the 2nd- and 3rd-place partitions inside a collapsed <details> — off by
+  // default so it doesn't clutter the panel, but there for anyone curious how close the
+  // field was (a clear standout winner vs. a virtual tie with a couple of alternatives).
+  function renderPracticeRunnersUp(runnersUp) {
+    const list = el('practiceRunnerUps');
+    if (!list) return;
+    list.innerHTML = '';
+    const catShortLabel = { one: '1-Card:', two: '2-Card:', four: '4-Card:' };
+    runnersUp.forEach((ru, i) => {
+      const item = document.createElement('div');
+      item.className = 'practice-runnerup-item';
+
+      const rank = document.createElement('div');
+      rank.className = 'practice-runnerup-rank';
+      rank.textContent = `#${i + 2}`;
+      item.appendChild(rank);
+
+      const cardsWrap = document.createElement('div');
+      cardsWrap.className = 'practice-ideal-cards';
+      ['one', 'two', 'four'].forEach((cat) => {
+        const group = document.createElement('span');
+        group.className = 'hc-group';
+        const lbl = document.createElement('span');
+        lbl.className = 'hc-label';
+        lbl.textContent = catShortLabel[cat];
+        group.appendChild(lbl);
+        group.appendChild(cardRow(ru.assignment[cat], { size: 'small' }));
+        cardsWrap.appendChild(group);
+      });
+      item.appendChild(cardsWrap);
+
+      const footer = document.createElement('div');
+      footer.className = 'practice-ideal-footer';
+      const evSpan = document.createElement('span');
+      evSpan.innerHTML = `Average EV: <span class="pscore ${ru.avgTotal > 0 ? 'pos' : ru.avgTotal < 0 ? 'neg' : ''}">${fmtEv(ru.avgTotal)}</span> pts/hand`;
+      footer.appendChild(evSpan);
+      const loadBtn = document.createElement('button');
+      loadBtn.className = 'secondary';
+      loadBtn.textContent = 'Load This Split';
+      loadBtn.addEventListener('click', () => {
+        if (!practice) return;
+        practice.assignment = deepCopy(ru.assignment);
+        practice.selectedCard = null;
+        renderPracticeArranger();
+      });
+      footer.appendChild(loadBtn);
+      item.appendChild(footer);
+
+      list.appendChild(item);
+    });
   }
 
   el('btnPracticeIdeal').addEventListener('click', async () => {
@@ -1167,8 +1230,8 @@
     const btn = el('btnPracticeIdeal');
     btn.disabled = true;
     btn.textContent = 'Calculating… 0%';
-    const idealTrials = practice.trials.length > PRACTICE_IDEAL_MAX_TRIALS
-      ? practice.trials.slice(0, PRACTICE_IDEAL_MAX_TRIALS)
+    const idealTrials = practice.trials.length > practiceIdealTrialTarget
+      ? practice.trials.slice(0, practiceIdealTrialTarget)
       : practice.trials;
     practice.ideal = await findIdealSplitAsync(practice.hand, idealTrials, practiceHomerunMode, (frac) => {
       btn.textContent = `Calculating… ${Math.round(frac * 100)}%`;
@@ -1293,6 +1356,31 @@
     el('practiceTrialsValue').textContent = practiceTrialTarget.toLocaleString();
     el('practiceHintTrials').textContent = practiceTrialTarget.toLocaleString();
   });
+
+  // Same log-scale setup, for the separate "Ideal split search boards" slider. Unlike the
+  // EV slider above, changing this doesn't require a New Hand — it just invalidates any
+  // cached ideal-split answer so the next "Show Ideal Split" click recomputes at the new
+  // count.
+  const idealTrialsRangeEl = el('practiceIdealTrialsRange');
+  if (idealTrialsRangeEl) {
+    idealTrialsRangeEl.min = 0;
+    idealTrialsRangeEl.max = PRACTICE_SLIDER_STEPS;
+    idealTrialsRangeEl.step = 1;
+    idealTrialsRangeEl.value = practiceTrialsToSlider(practiceIdealTrialTarget);
+    el('practiceIdealTrialsValue').textContent = practiceIdealTrialTarget.toLocaleString();
+
+    idealTrialsRangeEl.addEventListener('input', () => {
+      practiceIdealTrialTarget = practiceSliderToTrials(Number(idealTrialsRangeEl.value));
+      el('practiceIdealTrialsValue').textContent = practiceIdealTrialTarget.toLocaleString();
+      if (practice) {
+        practice.ideal = null;
+        el('practiceIdealPanel').classList.add('hidden');
+        const idealBtn = el('btnPracticeIdeal');
+        idealBtn.disabled = false;
+        idealBtn.textContent = 'Show Ideal Split';
+      }
+    });
+  }
 
   el('practiceHomerunToggle').addEventListener('change', () => {
     practiceHomerunMode = el('practiceHomerunToggle').checked;

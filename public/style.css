@@ -402,6 +402,31 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .practice-ideal-footer .pscore.pos { color: #1a7f37; }
 .practice-ideal-footer .pscore.neg { color: var(--danger); }
 
+.practice-ideal-trials-control { margin-top: 4px; }
+
+.practice-runnerups {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #f0d488;
+}
+.practice-runnerups summary {
+  cursor: pointer;
+  font-size: .85rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+.practice-runnerups[open] summary { margin-bottom: 10px; }
+.practice-runnerup-list { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.practice-runnerup-item {
+  background: #fbfbf9;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.practice-runnerup-rank { font-weight: 700; color: var(--muted); font-size: .8rem; margin-bottom: 6px; }
+.practice-runnerup-item .practice-ideal-cards { margin-bottom: 10px; }
+.practice-runnerup-item .practice-ideal-footer { font-weight: 500; font-size: .9rem; }
+
 .practice-ev-panel {
   background: #f6f7f9;
   border-radius: 12px;
