@@ -42,6 +42,89 @@
   };
   let revealInProgress = false;
 
+  // ---------- win sounds ----------
+  // Synthesized with the Web Audio API (a couple of short oscillator tones per cue)
+  // instead of shipping audio files — zero extra assets to host, and it means "add a
+  // sound" doesn't turn into "find/license/host an mp3." Only fires in live PvP games
+  // (results reveal), not Practice Mode, since practice hands run one after another too
+  // quickly for a sound cue to feel good rather than annoying.
+  const SOUND_PREF_KEY = 'taiwanese-poker-sound-enabled';
+  let soundEnabled = true;
+  try {
+    const saved = localStorage.getItem(SOUND_PREF_KEY);
+    if (saved !== null) soundEnabled = saved === 'true';
+  } catch (e) { /* localStorage unavailable (e.g. private mode) — default stays on */ }
+
+  let audioCtx = null;
+  function getAudioCtx() {
+    try {
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        audioCtx = new Ctx();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function playTone(ctx, freq, startTime, duration, peakGain, type) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(peakGain, startTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.05);
+  }
+
+  // A short ascending major arpeggio — the standard "you won this hand" chime.
+  function playWinSound() {
+    if (!soundEnabled) return;
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => { // C5 E5 G5 C6
+      playTone(ctx, freq, now + i * 0.09, 0.35, 0.16);
+    });
+  }
+
+  // A bigger fanfare for a homerun — the same arpeggio plus an extra high note and a
+  // sparkly triangle-wave tail, so it's clearly a step up from a plain win.
+  function playHomerunSound() {
+    if (!soundEnabled) return;
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5, 1318.51].forEach((freq, i) => { // C5 E5 G5 C6 E6
+      playTone(ctx, freq, now + i * 0.08, 0.4, 0.19);
+    });
+    playTone(ctx, 1567.98, now + 0.42, 0.55, 0.13, 'triangle'); // G6 sparkle on top
+  }
+
+  function setSoundEnabled(on) {
+    soundEnabled = on;
+    try { localStorage.setItem(SOUND_PREF_KEY, String(on)); } catch (e) { /* ignore */ }
+    const btn = el('btnSoundToggle');
+    if (btn) {
+      btn.textContent = on ? '🔊' : '🔇';
+      btn.classList.toggle('muted', !on);
+      btn.title = on ? 'Sound on — click to mute' : 'Sound off — click to unmute';
+    }
+  }
+
+  const soundToggleBtn = el('btnSoundToggle');
+  if (soundToggleBtn) {
+    setSoundEnabled(soundEnabled);
+    soundToggleBtn.addEventListener('click', () => setSoundEnabled(!soundEnabled));
+  }
+
   // ---------- card rendering ----------
   function cardEl(card, { size = 'normal', usedInBest = false } = {}) {
     const rank = card[0];
@@ -605,6 +688,8 @@
       tag.textContent = `⚾ HOMERUN${hrCount > 1 ? ' x' + hrCount : ''}`;
       head.querySelector('.pname').after(tag);
     });
+
+    if (r.homeruns.some((h) => h.winner === state.playerId)) playHomerunSound();
   }
 
   function finishReveal(r) {
@@ -627,6 +712,12 @@
       </tr>
     `).join('');
     table.classList.add('card-reveal');
+
+    // A homerun already got its own bigger fanfare (via showHomerunBanner, timed to the
+    // banner appearing) — don't also play the plain win chime on top of that for the same
+    // hand. Otherwise, a positive net score this hand gets the regular "you won" cue.
+    const wonHomerun = !!(r.homerunMode && r.homeruns && r.homeruns.some((h) => h.winner === state.playerId));
+    if (!wonHomerun && (r.pointsThisHand[state.playerId] || 0) > 0) playWinSound();
 
     const isHost = state.room && state.room.hostId === state.playerId;
     if (isHost) show('btnNextHand'); else hide('btnNextHand');
@@ -1014,13 +1105,16 @@
   }
 
   // ---------- practice mode: "Show Ideal Split" ----------
-  // Exhaustively scores all 105 ways to split the 7 practice cards against the SAME 150
-  // trials used everywhere else in this session, and returns the best one. A naive version
-  // of this (105 partitions x 150 trials, re-evaluating the opponent from scratch every
-  // time) takes ~15s in this codebase; benchmarked and confirmed correct, this version
-  // hoists the opponent's evaluation out of the partition loop (it doesn't depend on which
-  // partition we're testing) and shares the expensive 4-card PLO evaluation across the 3
-  // partitions that happen to use the same 4-card subset — same results, ~4x faster.
+  // Scores the 105 ways to split the 7 practice cards against the same trial set used
+  // everywhere else in this session, and returns the best one (plus 2 runner-ups). Two
+  // layers of speedup, both benchmarked and verified to produce the same winner as a plain
+  // exhaustive search in the common case: (1) the opponent's evaluation is hoisted out of
+  // the partition loop (it doesn't depend on which partition is being tested) and the
+  // expensive 4-card PLO evaluation is shared across whichever partitions happen to use the
+  // same 4-card subset — ~4x faster on its own; (2) a successive-halving search (see
+  // IDEAL_SEARCH_CHECKPOINTS below) that narrows from 105 partitions down to 10, then 3,
+  // using cheap early checkpoints, so the bulk of a large requested trial count only gets
+  // spent on genuine finalists.
   function allPartitions(cards) {
     const partitions = [];
     const oneCombos = window.Poker.combinations(cards, 1);
@@ -1035,26 +1129,74 @@
     return partitions;
   }
 
+  // Successive-halving search: instead of scoring all 105 partitions against every single
+  // requested board (expensive once the ideal-split slider is set high), narrow the field
+  // down using cheap early checkpoints, the same way you'd play it by hand — 200 boards is
+  // plenty to see which splits are clearly out of contention, 1000 narrows further to the
+  // real finalists, and only those get the rest of the requested trial budget. A partition
+  // that survives a checkpoint keeps its full cumulative score from trial 0 onward (nothing
+  // is re-run) — a partition that gets cut just stops accumulating, its score frozen at
+  // whatever it had at the checkpoint, since it was only needed to decide who gets cut.
+  // Checkpoints past the requested trial count are simply skipped, so at 100-200 boards
+  // this degrades gracefully back to "just run all 105 the whole way," same as before.
+  //
+  // The tradeoff: this is a heuristic, not an exhaustive search anymore. A partition that
+  // gets unlucky in its first 200 boards and falls out of the top 10 is gone for good, even
+  // if it would have pulled ahead given the full trial count. In practice the margin
+  // between the true best split and a split that's merely very good is usually much bigger
+  // than the noise at 200-1000 boards, so this rarely changes the answer — but it's not a
+  // hard guarantee the way scoring all 105 the whole way was.
+  const IDEAL_SEARCH_CHECKPOINTS = [
+    { afterTrials: 200, keep: 10 },
+    { afterTrials: 1000, keep: 3 }
+  ];
+
   function findIdealSplitAsync(hand, trials, homerunMode, onProgress) {
     return new Promise((resolve) => {
       const Poker = window.Poker;
-      const partitions = allPartitions(hand);
+      const allParts = allPartitions(hand);
+      const totalTrials = trials.length;
+      const checkpoints = IDEAL_SEARCH_CHECKPOINTS.filter((c) => c.afterTrials < totalTrials);
 
-      const fourGroups = new Map();
-      partitions.forEach((part, idx) => {
-        const key = [...part.four].sort().join(',');
-        if (!fourGroups.has(key)) fourGroups.set(key, { four: part.four, members: [] });
-        fourGroups.get(key).members.push(idx);
-      });
-
-      const totals = new Float64Array(partitions.length);
-      const CHUNK = 5; // trials per tick — small enough to keep the tab responsive
+      const totals = new Float64Array(allParts.length);
+      let active = allParts.map((_, i) => i); // indices into allParts/totals still in contention
+      let checkpointIdx = 0;
       let ti = 0;
 
-      function step() {
-        const end = Math.min(ti + CHUNK, trials.length);
-        for (; ti < end; ti++) {
-          const trial = trials[ti];
+      function fourGroupsFor(idxList) {
+        const groups = new Map();
+        idxList.forEach((idx) => {
+          const part = allParts[idx];
+          const key = [...part.four].sort().join(',');
+          if (!groups.has(key)) groups.set(key, { four: part.four, members: [] });
+          groups.get(key).members.push(idx);
+        });
+        return groups;
+      }
+      let fourGroups = fourGroupsFor(active);
+
+      // Rough work-unit estimate (trials x active-partition-count at each stage) purely to
+      // drive the progress bar — later stages process far fewer partitions per trial.
+      let totalWork = 0;
+      {
+        let prevCap = 0;
+        let keepCount = allParts.length;
+        checkpoints.forEach((c) => {
+          totalWork += (c.afterTrials - prevCap) * keepCount;
+          prevCap = c.afterTrials;
+          keepCount = c.keep;
+        });
+        totalWork += (totalTrials - prevCap) * keepCount;
+      }
+      let workDone = 0;
+
+      function currentCap() {
+        return checkpointIdx < checkpoints.length ? checkpoints[checkpointIdx].afterTrials : totalTrials;
+      }
+
+      function scoreRange(start, end) {
+        for (let i = start; i < end; i++) {
+          const trial = trials[i];
           const oc = {
             one: [
               evalHandOnBoard(trial.oppSplit.one, trial.boardA, 'one').score,
@@ -1078,7 +1220,7 @@
             const d4b = cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0;
             const fourPts = d4a + d4b;
             for (const idx of members) {
-              const part = partitions[idx];
+              const part = allParts[idx];
               const oneA = Poker.bestGeneric(part.one, trial.boardA).score;
               const oneB = Poker.bestGeneric(part.one, trial.boardB).score;
               const twoA = Poker.bestGeneric(part.two, trial.boardA).score;
@@ -1104,29 +1246,54 @@
             }
           }
         }
+      }
 
-        if (onProgress) onProgress(ti / trials.length);
-
-        if (ti < trials.length) {
-          setTimeout(step, 0);
-        } else {
-          // Rank all 105 partitions by total score and keep the top 3 — the winner, plus
-          // the next 2 runner-ups (shown collapsed in the UI, mostly to satisfy curiosity
-          // about how close the field was, e.g. whether the "ideal" split is a clear
-          // standout or basically tied with a couple of close alternatives).
-          const rankedIdx = partitions.map((_, i) => i).sort((a, b) => totals[b] - totals[a]);
-          const bestPartition = partitions[rankedIdx[0]];
-          // Re-derive the same result shape the rest of the UI expects, via the standard
-          // (now single-partition, so cheap) evaluator — guarantees the displayed number
-          // matches exactly what re-running that split manually would show. Same for each
-          // runner-up.
-          const result = evalAssignmentAcrossTrials(bestPartition, trials, homerunMode);
-          const runnersUp = rankedIdx.slice(1, 3).map((idx) => {
-            const partition = partitions[idx];
-            return { assignment: partition, ...evalAssignmentAcrossTrials(partition, trials, homerunMode) };
-          });
-          resolve({ assignment: bestPartition, ...result, runnersUp });
+      function step() {
+        const cap = currentCap();
+        // Aim each tick at roughly a fixed amount of work (trials x active partitions), so
+        // ticks stay responsive without wasting time on scheduling overhead once the field
+        // has narrowed and each trial got a lot cheaper to score.
+        const chunkTrials = Math.max(1, Math.min(cap - ti, Math.round(525 / active.length)));
+        const end = Math.min(ti + chunkTrials, cap);
+        if (end > ti) {
+          scoreRange(ti, end);
+          workDone += (end - ti) * active.length;
+          ti = end;
         }
+
+        if (onProgress) onProgress(Math.min(1, workDone / totalWork));
+
+        if (ti < cap) {
+          setTimeout(step, 0);
+          return;
+        }
+
+        if (checkpointIdx < checkpoints.length) {
+          const keep = checkpoints[checkpointIdx].keep;
+          active = active.slice().sort((a, b) => totals[b] - totals[a]).slice(0, keep);
+          fourGroups = fourGroupsFor(active);
+          checkpointIdx++;
+          setTimeout(step, 0);
+          return;
+        }
+
+        // Rank whatever's still active (could be all 105, if the trial count never hit a
+        // checkpoint, or as few as 3) and keep the top 3 — the winner, plus the next 2
+        // runner-ups shown collapsed in the UI.
+        const ranked = active.slice().sort((a, b) => totals[b] - totals[a]);
+        const top3 = ranked.slice(0, 3).map((idx) => allParts[idx]);
+        const [bestPartition, ...runnerUpPartitions] = top3;
+        // Re-derive the same result shape the rest of the UI expects, via the standard
+        // (single-partition, so cheap) evaluator — guarantees the displayed number matches
+        // exactly what re-running that split manually would show, and fills in the
+        // avgCells/homerun breakdown the fast scoring pass above doesn't track. Same for
+        // each runner-up; only 3 partitions get this treatment, so it's negligible cost.
+        const result = evalAssignmentAcrossTrials(bestPartition, trials, homerunMode);
+        const runnersUp = runnerUpPartitions.map((partition) => ({
+          assignment: partition,
+          ...evalAssignmentAcrossTrials(partition, trials, homerunMode)
+        }));
+        resolve({ assignment: bestPartition, ...result, runnersUp });
       }
 
       step();

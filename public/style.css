@@ -35,6 +35,23 @@ body {
   color: #fff;
 }
 .brand { font-weight: 700; font-size: 1.2rem; letter-spacing: .3px; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.sound-toggle {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  color: #fff;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s ease;
+}
+.sound-toggle:hover { background: rgba(255,255,255,0.28); }
+.sound-toggle.muted { opacity: .55; }
 .room-badge {
   background: rgba(255,255,255,0.15);
   padding: 6px 14px;
