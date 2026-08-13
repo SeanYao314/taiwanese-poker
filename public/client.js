@@ -216,7 +216,13 @@
       trayCards().forEach((c) => {
         const cardNode = cardEl(c);
         if (state.selectedCard === c) cardNode.classList.add('selected');
-        cardNode.addEventListener('click', () => {
+        cardNode.addEventListener('click', (ev) => {
+          if (ev.metaKey || ev.ctrlKey) {
+            placeInFirstOpenSlot(state.assignment, c);
+            state.selectedCard = null;
+            renderGame();
+            return;
+          }
           state.selectedCard = state.selectedCard === c ? null : c;
           renderGame();
         });
@@ -247,6 +253,20 @@
   }
 
   function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  // ⌘/Ctrl+click a tray card to skip the select-then-click-a-slot dance — drops it
+  // straight into the first slot (left to right: 1-card, 2-card, 4-card) that still has
+  // room. No-ops if every slot is already full. Shared by both the live game and
+  // Practice Mode, which each keep their own separate assignment object.
+  function placeInFirstOpenSlot(assignment, card) {
+    for (const slot of ['one', 'two', 'four']) {
+      if (assignment[slot].length < CAPACITY[slot]) {
+        assignment[slot].push(card);
+        return true;
+      }
+    }
+    return false;
+  }
 
   el('btnClear').addEventListener('click', () => {
     state.assignment = { one: [], two: [], four: [] };
@@ -772,7 +792,13 @@
     practiceTrayCards().forEach((c) => {
       const cardNode = cardEl(c);
       if (practice.selectedCard === c) cardNode.classList.add('selected');
-      cardNode.addEventListener('click', () => {
+      cardNode.addEventListener('click', (ev) => {
+        if (ev.metaKey || ev.ctrlKey) {
+          placeInFirstOpenSlot(practice.assignment, c);
+          practice.selectedCard = null;
+          renderPracticeArranger();
+          return;
+        }
         practice.selectedCard = practice.selectedCard === c ? null : c;
         renderPracticeArranger();
       });
