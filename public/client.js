@@ -690,9 +690,34 @@
   // against the SAME set of trials, so EV differences between your attempts are directly
   // comparable (no fresh variance each redo).
   const PRACTICE_TRIALS_MIN = 100;
-  const PRACTICE_TRIALS_MAX = 1000;
+  const PRACTICE_TRIALS_MAX = 10000;
   const PRACTICE_TRIALS_DEFAULT = 150;
   let practiceTrialTarget = PRACTICE_TRIALS_DEFAULT; // takes effect on the next dealt hand
+
+  // The board-count slider is logarithmic (100 to 10,000 spans two orders of magnitude —
+  // a linear slider would waste almost all of its travel on the 1000-10000 range and make
+  // it nearly impossible to land precisely on, say, 200). The <input type="range"> itself
+  // stays a plain linear control internally (0..PRACTICE_SLIDER_STEPS); these two helpers
+  // convert between that raw position and an actual trial count, snapped to a clean-ish
+  // number so the displayed value doesn't look like random noise (e.g. "2340" not "2337").
+  const PRACTICE_SLIDER_STEPS = 1000;
+  function practiceSliderToTrials(raw) {
+    const t = Math.min(1, Math.max(0, raw / PRACTICE_SLIDER_STEPS));
+    const logMin = Math.log10(PRACTICE_TRIALS_MIN);
+    const logMax = Math.log10(PRACTICE_TRIALS_MAX);
+    const exact = Math.pow(10, logMin + t * (logMax - logMin));
+    let snapped;
+    if (exact < 1000) snapped = Math.round(exact / 10) * 10;
+    else if (exact < 3000) snapped = Math.round(exact / 50) * 50;
+    else snapped = Math.round(exact / 100) * 100;
+    return Math.min(PRACTICE_TRIALS_MAX, Math.max(PRACTICE_TRIALS_MIN, snapped));
+  }
+  function practiceTrialsToSlider(trials) {
+    const logMin = Math.log10(PRACTICE_TRIALS_MIN);
+    const logMax = Math.log10(PRACTICE_TRIALS_MAX);
+    const t = (Math.log10(trials) - logMin) / (logMax - logMin);
+    return Math.round(t * PRACTICE_SLIDER_STEPS);
+  }
   // Unlike the trial count, this applies instantly (it's just a different lens on the
   // same trial data, not a re-deal) and persists as a sticky setting across New Hand
   // clicks until the user changes it.
@@ -888,14 +913,20 @@
 
   // Runs the current arrangement through all trials — cheap, pure client-side
   // evaluate5() calls, no network — so this can fire on every completed arrangement.
+  // Also tracks the sum of squares of the per-hand total so it can report the variance
+  // and standard deviation of the outcome (how swingy this split's results are trial to
+  // trial), plus the standard error of the EV estimate itself — i.e. roughly how far off
+  // "avgTotal" might be from the true long-run EV, given only `n` trials.
   function evalAssignmentAcrossTrials(assignment, trials, homerunMode) {
     let sumTotal = 0;
+    let sumTotalSq = 0;
     const sumCells = { one: [0, 0], two: [0, 0], four: [0, 0] };
     let homerunWins = 0;
     let homerunLosses = 0;
     trials.forEach((trial) => {
       const r = scoreTrial(assignment, trial, homerunMode);
       sumTotal += r.total;
+      sumTotalSq += r.total * r.total;
       ['one', 'two', 'four'].forEach((cat) => {
         sumCells[cat][0] += r.cells[cat][0];
         sumCells[cat][1] += r.cells[cat][1];
@@ -908,7 +939,12 @@
     ['one', 'two', 'four'].forEach((cat) => {
       avgCells[cat] = [sumCells[cat][0] / n, sumCells[cat][1] / n];
     });
-    return { avgTotal: sumTotal / n, avgCells, homerunWins, homerunLosses, n };
+    const avgTotal = sumTotal / n;
+    // Sample variance (n-1 denominator); guard the n===1 edge case.
+    const varianceTotal = n > 1 ? Math.max(0, (sumTotalSq - n * avgTotal * avgTotal) / (n - 1)) : 0;
+    const sdTotal = Math.sqrt(varianceTotal);
+    const seTotal = n > 0 ? sdTotal / Math.sqrt(n) : 0;
+    return { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal, seTotal };
   }
 
   function fmtEv(n) { return (n > 0 ? '+' : '') + n.toFixed(2); }
@@ -920,11 +956,22 @@
   }
 
   function renderPracticeEV(result) {
-    const { avgTotal, avgCells, homerunWins, homerunLosses, n } = result;
+    const { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal, seTotal } = result;
     el('practiceTrialCount').textContent = practice.trials.length;
     const totalSpan = el('practiceEvTotal');
     totalSpan.textContent = fmtEv(avgTotal);
     totalSpan.className = 'pscore ' + (avgTotal > 0 ? 'pos' : avgTotal < 0 ? 'neg' : '');
+
+    // Just for fun / for the curious: how swingy is this split's outcome trial-to-trial
+    // (variance / SD of the per-hand total), and how precise is the EV number above given
+    // only `n` trials (standard error of the mean — roughly, the true EV is within about
+    // +/-2*SE of avgTotal, 95% of the time).
+    const varLine = el('practiceVarianceLine');
+    if (varLine) {
+      varLine.textContent =
+        `\u{1F4CA} Variance: ${varianceTotal.toFixed(2)} pts² (SD ±${sdTotal.toFixed(2)} pts/hand) ` +
+        `· this EV estimate is accurate to roughly ±${seTotal.toFixed(3)} (1 SE) over ${n.toLocaleString()} boards`;
+    }
 
     const breakdown = el('practiceEvBreakdown');
     breakdown.innerHTML = '';
@@ -977,11 +1024,15 @@
     return partitions;
   }
 
-  // Cost scales with trial count (up to 1000, per the board-count slider), and at the
-  // top end this is ~25s of raw work — too long to run as one synchronous block without
-  // the browser tab appearing to hang (and risking a "page unresponsive" prompt). So this
-  // processes trials in small batches via setTimeout(0), yielding control back to the
-  // browser between batches and reporting progress, instead of doing it all in one go.
+  // The board-count slider goes up to 10,000, but the "ideal split" answer itself barely
+  // moves past ~1000 boards — at that point the estimate has converged enough that more
+  // trials just burn time without changing which of the 105 partitions comes out on top.
+  // So this search always caps itself at PRACTICE_IDEAL_MAX_TRIALS regardless of the
+  // slider, using the first N of the session's trials (still the same shared trial set
+  // used everywhere else, just truncated) — keeps the search itself well under render-
+  // freezing territory even when the EV/variance panel above is crunching 10,000 boards.
+  const PRACTICE_IDEAL_MAX_TRIALS = 1000;
+
   function findIdealSplitAsync(hand, trials, homerunMode, onProgress) {
     return new Promise((resolve) => {
       const Poker = window.Poker;
@@ -1093,6 +1144,19 @@
     evSpan.textContent = fmtEv(ideal.avgTotal);
     evSpan.className = 'pscore ' + (ideal.avgTotal > 0 ? 'pos' : ideal.avgTotal < 0 ? 'neg' : '');
 
+    // The search itself always caps at PRACTICE_IDEAL_MAX_TRIALS boards even if the
+    // slider above is set higher, so make that explicit whenever it actually kicked in —
+    // otherwise "Average EV" here and the EV panel's own number are silently over
+    // different-sized (if overlapping) trial sets.
+    const noteEl = el('practiceIdealTrialNote');
+    if (noteEl) {
+      if (ideal.n < practice.trials.length) {
+        noteEl.textContent = `(checked against the first ${ideal.n.toLocaleString()} of your ${practice.trials.length.toLocaleString()} boards — the ideal split stops changing well before that many, so it's capped for speed)`;
+      } else {
+        noteEl.textContent = '(checked against these same boards)';
+      }
+    }
+
     el('practiceIdealPanel').classList.remove('hidden');
   }
 
@@ -1103,7 +1167,10 @@
     const btn = el('btnPracticeIdeal');
     btn.disabled = true;
     btn.textContent = 'Calculating… 0%';
-    practice.ideal = await findIdealSplitAsync(practice.hand, practice.trials, practiceHomerunMode, (frac) => {
+    const idealTrials = practice.trials.length > PRACTICE_IDEAL_MAX_TRIALS
+      ? practice.trials.slice(0, PRACTICE_IDEAL_MAX_TRIALS)
+      : practice.trials;
+    practice.ideal = await findIdealSplitAsync(practice.hand, idealTrials, practiceHomerunMode, (frac) => {
       btn.textContent = `Calculating… ${Math.round(frac * 100)}%`;
     });
     btn.disabled = false;
@@ -1209,10 +1276,22 @@
     show('screen-landing');
   });
 
-  el('practiceTrialsRange').addEventListener('input', () => {
-    practiceTrialTarget = Number(el('practiceTrialsRange').value);
-    el('practiceTrialsValue').textContent = practiceTrialTarget;
-    el('practiceHintTrials').textContent = practiceTrialTarget;
+  // The slider element itself is a plain linear <input type="range"> — its raw value is
+  // a position (0..PRACTICE_SLIDER_STEPS), not a trial count. Set its bounds/initial
+  // position here (rather than hardcoding a "nice" HTML default attribute) so it stays in
+  // sync with PRACTICE_TRIALS_MIN/MAX/DEFAULT if those ever change.
+  const trialsRangeEl = el('practiceTrialsRange');
+  trialsRangeEl.min = 0;
+  trialsRangeEl.max = PRACTICE_SLIDER_STEPS;
+  trialsRangeEl.step = 1;
+  trialsRangeEl.value = practiceTrialsToSlider(practiceTrialTarget);
+  el('practiceTrialsValue').textContent = practiceTrialTarget.toLocaleString();
+  el('practiceHintTrials').textContent = practiceTrialTarget.toLocaleString();
+
+  trialsRangeEl.addEventListener('input', () => {
+    practiceTrialTarget = practiceSliderToTrials(Number(trialsRangeEl.value));
+    el('practiceTrialsValue').textContent = practiceTrialTarget.toLocaleString();
+    el('practiceHintTrials').textContent = practiceTrialTarget.toLocaleString();
   });
 
   el('practiceHomerunToggle').addEventListener('change', () => {
