@@ -15,13 +15,18 @@
     es = new EventSource(`/api/stream?code=${encodeURIComponent(state.code)}&playerId=${encodeURIComponent(state.playerId)}&token=${encodeURIComponent(state.token)}`);
     es.addEventListener('room_state', (e) => handleRoomState(JSON.parse(e.data)));
     es.addEventListener('your_hand', (e) => handleYourHand(JSON.parse(e.data)));
+    es.addEventListener('flop', (e) => handleFlop(JSON.parse(e.data)));
     es.addEventListener('results', (e) => handleResults(JSON.parse(e.data)));
     return es;
   }
 
   const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' };
   const SUIT_CLASS = { s: 'suit-s', h: 'suit-h', d: 'suit-d', c: 'suit-c' }; // 4-color deck: s=black h=red d=blue c=green
-  const CAPACITY = { one: 1, two: 2, four: 4 };
+  const CAPACITY = { one: 1, two: 2, four: 4 }; // final-hand shape — Practice Mode always uses this
+  // Homerun Pineapple's pre-flop capacity: everyone builds a 2/3/5 split first, then
+  // discards 1 from each hand after the flop to land back on CAPACITY above. Only the live
+  // game's arranging screen ever uses this — Practice Mode doesn't have a Pineapple mode.
+  const CAPACITY_PINEAPPLE_PRE = { one: 2, two: 3, four: 5 };
   const SLOT_TITLES = { one: '1-Card Hand', two: '2-Card Hand', four: '4-Card PLO Hand' };
   const STORAGE_KEY = 'taiwanese-poker-session';
 
@@ -38,7 +43,11 @@
     myHand: null,
     assignment: { one: [], two: [], four: [] },
     selectedCard: null,
-    locked: false
+    locked: false,
+    // ---- Homerun Pineapple discard round ----
+    flop: null, // { boardA: [3 cards], boardB: [3 cards] }
+    discardSelections: { one: null, two: null, four: null }, // one card marked per hand
+    discardLocked: false
   };
   let revealInProgress = false;
 
@@ -175,11 +184,21 @@
     show('landingError');
   }
 
+  // Homerun scoring is forced on for Pineapple (it's part of what makes it that variant),
+  // so the standalone checkbox only makes sense for Standard rooms — hide it otherwise.
+  function updateVariantUI() {
+    const isPineapple = el('variantPineapple').checked;
+    if (isPineapple) hide('createHomerunRow'); else show('createHomerunRow');
+  }
+  document.querySelectorAll('input[name="variant"]').forEach((r) => r.addEventListener('change', updateVariantUI));
+  updateVariantUI();
+
   el('btnCreate').addEventListener('click', async () => {
     const name = el('createName').value.trim() || 'Host';
     const maxPlayers = Number(el('createMax').value);
+    const variant = el('variantPineapple').checked ? 'pineapple' : 'standard';
     const homerunMode = el('createHomerun').checked;
-    const res = await api('/api/create_room', { name, maxPlayers, homerunMode });
+    const res = await api('/api/create_room', { name, maxPlayers, variant, homerunMode });
     if (!res.ok) return landingError(res.error);
     state.code = res.code; state.playerId = res.playerId; state.token = res.token; state.name = name;
     saveSession();
@@ -206,7 +225,7 @@
     el('lobbyCode').textContent = state.code;
     el('shareLink').value = `${location.origin}/?join=${state.code}`;
     ['landing', 'lobby'].forEach((s) => (s === 'lobby' ? show : hide)('screen-' + s));
-    hide('screen-game'); hide('screen-results');
+    hide('screen-game'); hide('screen-results'); hide('screen-discard');
   }
 
   el('btnCopyLink').addEventListener('click', () => {
@@ -222,7 +241,15 @@
   function renderLobby(room) {
     el('lobbyCount').textContent = room.players.length;
     el('lobbyMax').textContent = room.maxPlayers;
-    if (room.homerunMode) show('lobbyHomerunBadge'); else hide('lobbyHomerunBadge');
+    // Pineapple's badge already says "homerun scoring always on," so don't also show the
+    // plain homerun badge underneath it — that'd just be redundant.
+    if (room.variant === 'pineapple') {
+      show('lobbyPineappleBadge');
+      hide('lobbyHomerunBadge');
+    } else {
+      hide('lobbyPineappleBadge');
+      if (room.homerunMode) show('lobbyHomerunBadge'); else hide('lobbyHomerunBadge');
+    }
     const list = el('lobbyPlayers');
     list.innerHTML = '';
     room.players.forEach((p) => {
@@ -250,12 +277,23 @@
   }
 
   // ---------- arranging ----------
+  // Standard rooms arrange straight into the final CAPACITY (1/2/4). Pineapple rooms
+  // arrange into the bigger pre-flop CAPACITY_PINEAPPLE_PRE (2/3/5) here, then discard
+  // down to 1/2/4 on the separate discard screen once the flop is shown.
+  function liveCapacity() {
+    return (state.room && state.room.variant === 'pineapple') ? CAPACITY_PINEAPPLE_PRE : CAPACITY;
+  }
+
   function handleYourHand({ hand, assignment }) {
     state.myHand = hand;
     state.locked = !!assignment;
     state.assignment = assignment ? deepCopy(assignment) : { one: [], two: [], four: [] };
     state.selectedCard = null;
-    hide('screen-lobby'); hide('screen-results');
+    // Mid-hand reconnect during Pineapple's discard phase: the server resends this hand's
+    // data first, followed by a 'flop' event that actually switches to the discard screen
+    // — don't flip to the arranging screen in between.
+    if (state.room && state.room.phase === 'discarding') return;
+    hide('screen-lobby'); hide('screen-results'); hide('screen-discard');
     show('screen-game');
     renderGame();
   }
@@ -269,7 +307,14 @@
 
   function renderGame() {
     el('handNumber').textContent = state.room ? state.room.handNumber : '';
-    if (state.room && state.room.homerunMode) show('gameHomerunTag'); else hide('gameHomerunTag');
+    const isPineapple = state.room && state.room.variant === 'pineapple';
+    if (state.room && state.room.homerunMode && !isPineapple) show('gameHomerunTag'); else hide('gameHomerunTag');
+    if (isPineapple) show('gamePineappleTag'); else hide('gamePineappleTag');
+
+    const cap = liveCapacity();
+    el('slotTitleOne').textContent = isPineapple ? `${cap.one}-Card Hand (discard 1 after the flop)` : '1-Card Hand';
+    el('slotTitleTwo').textContent = isPineapple ? `${cap.two}-Card Hand (discard 1 after the flop)` : '2-Card Hand';
+    el('slotTitleFour').textContent = isPineapple ? `${cap.four}-Card PLO Hand (discard 1 after the flop)` : '4-Card PLO Hand';
 
     const disabled = state.locked;
     ['one', 'two', 'four'].forEach((slot) => {
@@ -293,7 +338,9 @@
     if (disabled) {
       const msg = document.createElement('div');
       msg.className = 'hint';
-      msg.textContent = 'Hand locked — waiting for other players…';
+      msg.textContent = isPineapple
+        ? 'Hand locked — waiting for other players before the flop…'
+        : 'Hand locked — waiting for other players…';
       tray.appendChild(msg);
     } else {
       trayCards().forEach((c) => {
@@ -301,7 +348,7 @@
         if (state.selectedCard === c) cardNode.classList.add('selected');
         cardNode.addEventListener('click', (ev) => {
           if (ev.metaKey || ev.ctrlKey) {
-            placeInFirstOpenSlot(state.assignment, c);
+            placeInFirstOpenSlot(state.assignment, c, cap);
             state.selectedCard = null;
             renderGame();
             return;
@@ -318,7 +365,7 @@
         if (disabled) return;
         const slot = slotDiv.dataset.slot;
         if (!state.selectedCard) return;
-        if (state.assignment[slot].length >= CAPACITY[slot]) return;
+        if (state.assignment[slot].length >= cap[slot]) return;
         state.assignment[slot].push(state.selectedCard);
         state.selectedCard = null;
         renderGame();
@@ -326,9 +373,9 @@
     });
 
     const allPlaced = trayCards().length === 0
-      && state.assignment.one.length === 1
-      && state.assignment.two.length === 2
-      && state.assignment.four.length === 4;
+      && state.assignment.one.length === cap.one
+      && state.assignment.two.length === cap.two
+      && state.assignment.four.length === cap.four;
     el('btnLock').disabled = disabled || !allPlaced;
     el('btnClear').disabled = disabled;
 
@@ -339,11 +386,12 @@
 
   // ⌘/Ctrl+click a tray card to skip the select-then-click-a-slot dance — drops it
   // straight into the first slot (left to right: 1-card, 2-card, 4-card) that still has
-  // room. No-ops if every slot is already full. Shared by both the live game and
-  // Practice Mode, which each keep their own separate assignment object.
-  function placeInFirstOpenSlot(assignment, card) {
+  // room. No-ops if every slot is already full. Shared by the live game (standard or
+  // Pineapple pre-flop, via its own capacity) and Practice Mode (always the plain
+  // CAPACITY default), each with their own separate assignment object.
+  function placeInFirstOpenSlot(assignment, card, capacity = CAPACITY) {
     for (const slot of ['one', 'two', 'four']) {
-      if (assignment[slot].length < CAPACITY[slot]) {
+      if (assignment[slot].length < capacity[slot]) {
         assignment[slot].push(card);
         return true;
       }
@@ -375,6 +423,94 @@
     el('lockStatus').textContent = `${lockedCount}/${state.room.players.length} locked`;
   }
 
+  // ---------- discard round (Homerun Pineapple only) ----------
+  // Everyone's pre-flop 2/3/5 split is already sitting in state.assignment (set back when
+  // they clicked "Lock Hand" on the arranging screen) — the flop event doesn't need to
+  // resend it for the normal, still-connected case. It only gets resent by the server for
+  // a mid-discard reconnect (see handleYourHand above).
+  function handleFlop(flop) {
+    state.flop = flop;
+    const me = state.room && state.room.players.find((p) => p.id === state.playerId);
+    state.discardLocked = !!(me && me.locked);
+    if (!state.discardLocked) state.discardSelections = { one: null, two: null, four: null };
+    hide('screen-lobby'); hide('screen-game'); hide('screen-results');
+    show('screen-discard');
+    renderDiscardScreen();
+  }
+
+  function renderDiscardBoards(flop) {
+    const row = el('discardBoardsRow');
+    row.innerHTML = '';
+    [['Board A (flop)', flop.boardA], ['Board B (flop)', flop.boardB]].forEach(([label, cards]) => {
+      const block = document.createElement('div');
+      block.className = 'board-block';
+      const h = document.createElement('h4');
+      h.textContent = label;
+      block.appendChild(h);
+      block.appendChild(cardRow(cards));
+      row.appendChild(block);
+    });
+  }
+
+  function renderDiscardScreen() {
+    el('discardHandNumber').textContent = state.room ? state.room.handNumber : '';
+    renderDiscardBoards(state.flop);
+
+    const waiting = state.discardLocked;
+    hide('discardError');
+
+    ['one', 'two', 'four'].forEach((cat) => {
+      const container = el('discardSlot' + capitalize(cat));
+      container.innerHTML = '';
+      state.assignment[cat].forEach((c) => {
+        const cardNode = cardEl(c);
+        if (state.discardSelections[cat] === c) cardNode.classList.add('marked-discard');
+        if (!waiting) {
+          cardNode.addEventListener('click', () => {
+            state.discardSelections[cat] = state.discardSelections[cat] === c ? null : c;
+            renderDiscardScreen();
+          });
+        }
+        container.appendChild(cardNode);
+      });
+    });
+
+    if (waiting) {
+      show('discardWaitingHint');
+    } else {
+      hide('discardWaitingHint');
+    }
+
+    const allMarked = ['one', 'two', 'four'].every((cat) => state.discardSelections[cat]);
+    el('btnDiscardConfirm').disabled = waiting || !allMarked;
+    el('btnDiscardConfirm').textContent = waiting ? 'Discarded' : 'Discard & Continue';
+
+    updateDiscardLockStatus();
+  }
+
+  function updateDiscardLockStatus() {
+    if (!state.room) return;
+    const lockedCount = state.room.players.filter((p) => p.locked).length;
+    el('discardLockStatus').textContent = `${lockedCount}/${state.room.players.length} discarded`;
+  }
+
+  el('btnDiscardConfirm').addEventListener('click', async () => {
+    const res = await api('/api/discard', {
+      code: state.code,
+      playerId: state.playerId,
+      token: state.token,
+      discards: state.discardSelections
+    });
+    if (!res.ok) {
+      el('discardError').textContent = res.error;
+      show('discardError');
+      return;
+    }
+    hide('discardError');
+    state.discardLocked = true;
+    renderDiscardScreen();
+  });
+
   // ---------- results ----------
   // The full results payload arrives from the server all at once (nothing is hidden),
   // but we reveal it to the player as a staged, timed "sweat" sequence: hole cards are
@@ -388,7 +524,7 @@
 
   function handleResults(results) {
     state.lastResults = results;
-    hide('screen-game'); hide('screen-lobby');
+    hide('screen-game'); hide('screen-lobby'); hide('screen-discard');
     show('screen-results');
     startResultsReveal(results);
   }
@@ -1588,6 +1724,8 @@
       renderLobby(room);
     } else if (room.phase === 'arranging') {
       updateLockStatus();
+    } else if (room.phase === 'discarding') {
+      updateDiscardLockStatus();
     } else if (room.phase === 'results') {
       if (revealInProgress) return; // don't let a late room_state event show the button mid-reveal
       const isHost = room.hostId === state.playerId;

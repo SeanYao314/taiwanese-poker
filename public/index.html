@@ -41,7 +41,20 @@
             <option value="4" selected>4</option>
           </select>
         </label>
-        <label class="checkbox-label">
+        <div class="variant-select">
+          <label>Game Variant</label>
+          <div class="variant-options">
+            <label class="radio-label">
+              <input type="radio" name="variant" id="variantStandard" value="standard" checked />
+              <span>Standard <span class="hint-inline">7 cards &rarr; 1/2/4-card hands</span></span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="variant" id="variantPineapple" value="pineapple" />
+              <span>Homerun Pineapple <span class="hint-inline">10 cards &rarr; 2/3/5-card hands, discard 1 from each after the flop, then plays out like Homerun mode &mdash; homerun scoring is always on</span></span>
+            </label>
+          </div>
+        </div>
+        <label class="checkbox-label" id="createHomerunRow">
           <input id="createHomerun" type="checkbox" />
           <span>Homerun scoring <span class="hint-inline">(sweep all 6 comparisons vs an opponent &mdash; both boards, all 3 hands, no ties &mdash; and the whole match total against them doubles)</span></span>
         </label>
@@ -83,6 +96,16 @@
         <li>Exact ties push (no points change hands).</li>
       </ul>
     </details>
+
+    <details class="rules-box">
+      <summary>How Homerun Pineapple works</summary>
+      <ul>
+        <li>Everyone gets <strong>10 cards</strong> instead of 7, and blind-builds a <strong>2-card</strong>, <strong>3-card</strong>, and <strong>5-card</strong> hand (using all 10) before anything is revealed.</li>
+        <li>Once everyone's locked in, <strong>the flop</strong> shows — the first 3 cards of both boards. Each player then discards exactly 1 card from each of their three hands: 2&rarr;1, 3&rarr;2, 5&rarr;4.</li>
+        <li>Discarded cards are just gone for the hand — dead cards, not shuffled back in. The last 2 cards of each board (already dealt, just not shown yet) were fixed before anyone discarded, so a discard can never change what shows up there.</li>
+        <li>From there it plays exactly like a normal Homerun hand with your final 1/2/4-card hands: two full boards, all the usual comparisons, and <strong>homerun scoring is always on</strong> for this variant (sweep all 6 comparisons vs. an opponent to double that match's total, 12&rarr;24).</li>
+      </ul>
+    </details>
   </section>
 
   <!-- LOBBY -->
@@ -94,6 +117,7 @@
         <input id="shareLink" type="text" readonly />
         <button id="btnCopyLink">Copy Link</button>
       </div>
+      <p id="lobbyPineappleBadge" class="homerun-mode-badge pineapple-badge hidden">🍍⚾ Homerun Pineapple &mdash; 10 cards, discard after the flop, homerun scoring always on</p>
       <p id="lobbyHomerunBadge" class="homerun-mode-badge hidden">⚾ Homerun scoring is ON for this room</p>
       <h3>Players (<span id="lobbyCount"></span>/<span id="lobbyMax"></span>)</h3>
       <ul id="lobbyPlayers" class="player-list"></ul>
@@ -106,21 +130,21 @@
   <section id="screen-game" class="screen hidden">
     <div class="card-panel wide">
       <div class="game-header">
-        <h2>Hand #<span id="handNumber"></span> <span id="gameHomerunTag" class="homerun-tag hidden">⚾ HOMERUN MODE</span></h2>
+        <h2>Hand #<span id="handNumber"></span> <span id="gameHomerunTag" class="homerun-tag hidden">⚾ HOMERUN MODE</span> <span id="gamePineappleTag" class="homerun-tag pineapple-tag hidden">🍍 PINEAPPLE — pre-flop</span></h2>
         <div id="lockStatus" class="lock-status"></div>
       </div>
 
       <div class="slots">
         <div class="slot" data-slot="one">
-          <div class="slot-title">1-Card Hand <span class="pt">worth 1 pt / board</span></div>
+          <div class="slot-title"><span id="slotTitleOne">1-Card Hand</span> <span class="pt">worth 1 pt / board</span></div>
           <div class="slot-cards" id="slotOne"></div>
         </div>
         <div class="slot" data-slot="two">
-          <div class="slot-title">2-Card Hand <span class="pt">worth 2 pt / board</span></div>
+          <div class="slot-title"><span id="slotTitleTwo">2-Card Hand</span> <span class="pt">worth 2 pt / board</span></div>
           <div class="slot-cards" id="slotTwo"></div>
         </div>
         <div class="slot" data-slot="four">
-          <div class="slot-title">4-Card PLO Hand <span class="pt">worth 3 pt / board</span></div>
+          <div class="slot-title"><span id="slotTitleFour">4-Card PLO Hand</span> <span class="pt">worth 3 pt / board</span></div>
           <div class="slot-cards" id="slotFour"></div>
         </div>
       </div>
@@ -135,6 +159,41 @@
         <button id="btnLock" class="primary" disabled>Lock Hand</button>
       </div>
       <p id="gameError" class="error hidden"></p>
+    </div>
+  </section>
+
+  <!-- DISCARD (Homerun Pineapple only: after the flop, drop 1 card from each hand) -->
+  <section id="screen-discard" class="screen hidden">
+    <div class="card-panel wide">
+      <div class="game-header">
+        <h2>Hand #<span id="discardHandNumber"></span> <span class="homerun-tag pineapple-tag">🍍 PINEAPPLE — discard round</span></h2>
+        <div id="discardLockStatus" class="lock-status"></div>
+      </div>
+      <p class="hint" style="margin-top:-6px;">The flop is in. Click one card in each hand below to discard it — whatever's left becomes your final 1/2/4-card hands, and it plays out like a normal Homerun hand from there.</p>
+
+      <div class="boards-row" id="discardBoardsRow"></div>
+
+      <div class="slots">
+        <div class="slot">
+          <div class="slot-title">2-Card Hand <span class="pt">discard 1 &rarr; 1-card hand</span></div>
+          <div class="slot-cards" id="discardSlotOne"></div>
+        </div>
+        <div class="slot">
+          <div class="slot-title">3-Card Hand <span class="pt">discard 1 &rarr; 2-card hand</span></div>
+          <div class="slot-cards" id="discardSlotTwo"></div>
+        </div>
+        <div class="slot">
+          <div class="slot-title">5-Card PLO Hand <span class="pt">discard 1 &rarr; 4-card hand</span></div>
+          <div class="slot-cards" id="discardSlotFour"></div>
+        </div>
+      </div>
+
+      <p id="discardWaitingHint" class="hint hidden">Discarded — waiting for other players…</p>
+
+      <div class="actions">
+        <button id="btnDiscardConfirm" class="primary" disabled>Discard &amp; Continue</button>
+      </div>
+      <p id="discardError" class="error hidden"></p>
     </div>
   </section>
 

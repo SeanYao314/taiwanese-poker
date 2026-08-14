@@ -24,6 +24,17 @@ When creating a room, the host can check **Homerun scoring**. With it on: if you
 
 Note: `experiments/solve/` (below) was researched under an earlier, per-board version of this rule (sweep one board, double that board's 6 points). The homerun-vs-standard strategy notes there are illustrative of the general effect — reinforcing the 1-card slot instead of dumping your weakest card there — but haven't been re-run against the current full-match-sweep definition; treat those specific numbers as approximate if you want to lean on them precisely.
 
+### Optional: Homerun Pineapple variant
+
+Picked at room creation (**Game Variant: Standard** vs. **Homerun Pineapple**), not a checkbox — it changes the deal itself, not just the scoring:
+
+- Everyone is dealt **10 cards** instead of 7, and blind-builds a **2-card**, **3-card**, and **5-card** hand (using all 10) before anything is revealed — the arranging screen works exactly like the standard game, just with bigger hands and a "discard 1 after the flop" reminder on each slot.
+- Once everyone's locked that pre-flop split, **the flop** shows: the first 3 cards of both boards. Each player then discards exactly **1 card from each of their three hands** — 2→1, 3→2, 5→4 — on a dedicated discard screen (click a card to mark it, click again to unmark; "Discard & Continue" unlocks once all three hands have exactly one marked).
+- The last 2 cards of each board (the "turn" and "river") were already dealt and fixed at the very start of the hand, before anyone saw the flop or discarded anything — a discard can never change what shows up there, and discarded cards are simply dead for the rest of the hand, never reshuffled back into anything.
+- From there it plays out **exactly** like a normal Homerun hand with the resulting 1/2/4-card hands: full board reveal, all the usual comparisons, and homerun scoring is **always on** for this variant (it's not a separate toggle — sweeping all 6 comparisons vs. an opponent still doubles that match's total, 12→24). This is also why almost nothing had to change in `lib/game.js`'s scoring engine: `evaluatePlayer`/`computeResults` only ever see the final 1/2/4 shape, whichever variant produced it.
+
+This variant is intentionally **not** wired into Practice Mode or the `experiments/solve/` strategy research yet — no pre-solved opponent pool or EV tooling exists for the bigger pre-flop decision + discard step, so it's live-room-only for now.
+
 ## Running it locally
 
 Requires Node.js 18+ (no other dependencies).
@@ -42,11 +53,11 @@ node tests/poker.test.js
 
 ## How the game works
 
-1. One player creates a room (picks a max player count, 2–4) and gets a 4-character room code plus a shareable link.
+1. One player creates a room (picks a max player count, 2–4, and a **Game Variant** — Standard or Homerun Pineapple, see below) and gets a 4-character room code plus a shareable link.
 2. Others join with that code from the landing page's "Join Room" tab.
-3. Once at least 2 players have joined, the host clicks **Start Game** — everyone is privately dealt 7 cards.
-4. Each player clicks a card to select it, then clicks the 1-card / 2-card / 4-card hand box to place it there (click a placed card to send it back). **Lock Hand** becomes available once all 7 cards are assigned.
-5. Once everyone has locked, both boards are revealed automatically along with every comparison, points for the hand, and a running scoreboard.
+3. Once at least 2 players have joined, the host clicks **Start Game** — everyone is privately dealt 7 cards (10 for Homerun Pineapple).
+4. Each player clicks a card to select it, then clicks the hand box to place it there (click a placed card to send it back). **Lock Hand** becomes available once every card is assigned.
+5. Standard: once everyone has locked, both boards are revealed automatically along with every comparison, points for the hand, and a running scoreboard. Homerun Pineapple: locking here submits your pre-flop 2/3/5 split — once everyone's locked, the flop shows and there's one more step (discard 1 from each hand) before the same automatic reveal happens.
 6. The host clicks **Deal Next Hand** to continue; cumulative scores persist for the room's session.
 
 Rooms and scores live in server memory only — restarting the server clears everything. That's fine for a casual game night; see below if you want persistence.

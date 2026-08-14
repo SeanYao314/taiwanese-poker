@@ -110,5 +110,55 @@ assert(typeof G.validateAssignment(hands.alice, { one: ['Ah'], two: ['2h', '3h']
   assert(hrSum === 0, 'homerun-mode scoring is still zero-sum on an arbitrary random deal');
 }
 
+// --- Homerun Pineapple: deal size, pre-flop capacity, and the discard step ---
+{
+  // 10-card deal, full boards dealt up front (turn/river fixed before any discarding).
+  const pine = G.dealHand(['alice', 'bob', 'carol'], 10);
+  const allPineDealt = [...pine.hands.alice, ...pine.hands.bob, ...pine.hands.carol, ...pine.boards[0], ...pine.boards[1]];
+  assert(allPineDealt.length === new Set(allPineDealt).size, 'pineapple deal: no duplicate cards across hands + boards');
+  assert(allPineDealt.length === 3 * 10 + 10, 'pineapple deal: correct total card count (10/player + 2 boards)');
+  assert(pine.hands.alice.length === 10, 'pineapple deal: each player gets 10 cards');
+
+  function pineappleSplit(cards) {
+    return { one: cards.slice(0, 2), two: cards.slice(2, 5), four: cards.slice(5, 10) };
+  }
+  const alicePre = pineappleSplit(pine.hands.alice);
+  assert(G.validateAssignment(pine.hands.alice, alicePre, G.PINEAPPLE_PRE_CAPACITY) === null, 'pineapple pre-flop: valid 2/3/5 split passes validation against PINEAPPLE_PRE_CAPACITY');
+  assert(typeof G.validateAssignment(pine.hands.alice, alicePre, G.STANDARD_CAPACITY) === 'string', 'pineapple pre-flop: that same 2/3/5 split is correctly REJECTED against STANDARD_CAPACITY (1/2/4)');
+  assert(typeof G.validateAssignment(pine.hands.alice, { one: [], two: [], four: [] }, G.PINEAPPLE_PRE_CAPACITY) === 'string', 'pineapple pre-flop: incomplete assignment is rejected');
+
+  // Discard 1 from each hand -> should land exactly on STANDARD_CAPACITY (1/2/4), and the
+  // discarded cards should be gone (not present anywhere in the resulting assignment).
+  const discards = { one: alicePre.one[0], two: alicePre.two[0], four: alicePre.four[0] };
+  const discardResult = G.validateDiscards(alicePre, discards);
+  assert(!discardResult.error, 'pineapple discard: a legal one-per-hand discard is accepted');
+  const reduced = discardResult.assignment;
+  assert(reduced.one.length === 1 && reduced.two.length === 2 && reduced.four.length === 4, 'pineapple discard: reduced assignment lands exactly on the standard 1/2/4 shape');
+  const reducedAll = [...reduced.one, ...reduced.two, ...reduced.four];
+  assert(!reducedAll.includes(discards.one) && !reducedAll.includes(discards.two) && !reducedAll.includes(discards.four), 'pineapple discard: discarded cards do not appear anywhere in the reduced assignment (not shuffled back in)');
+  assert(G.validateAssignment(pine.hands.alice, reduced, G.STANDARD_CAPACITY) === null, 'pineapple discard: the reduced assignment is itself a valid standard assignment');
+
+  // Illegal discards: a card from the wrong hand, or a card not in hand at all.
+  const wrongHandDiscard = { one: alicePre.two[0], two: alicePre.two[1], four: alicePre.four[0] };
+  assert(typeof G.validateDiscards(alicePre, wrongHandDiscard).error === 'string', 'pineapple discard: discarding a card from the WRONG hand-group is rejected');
+  const foreignCardDiscard = { one: 'Ah', two: alicePre.two[0], four: alicePre.four[0] };
+  const foreignIsActuallyForeign = !alicePre.one.includes('Ah');
+  if (foreignIsActuallyForeign) {
+    assert(typeof G.validateDiscards(alicePre, foreignCardDiscard).error === 'string', 'pineapple discard: discarding a card that was never dealt to that hand is rejected');
+  }
+
+  // End-to-end: after discarding for all three players, computeResults runs completely
+  // unchanged (same function used by standard games) and the result is zero-sum, forced
+  // homerun-aware just like a real Pineapple room would use it.
+  const finalPlayers = Object.entries(pine.hands).map(([id, cards]) => {
+    const pre = pineappleSplit(cards);
+    const d = { one: pre.one[0], two: pre.two[0], four: pre.four[0] };
+    return { id, name: id, assignment: G.validateDiscards(pre, d).assignment };
+  });
+  const pineResults = G.computeResults(finalPlayers, pine.boards, true);
+  const pineSum = Object.values(pineResults.pointsByPlayer).reduce((a, b) => a + b, 0);
+  assert(pineSum === 0, 'pineapple end-to-end: post-discard computeResults (homerun-aware) is zero-sum, same engine as standard games');
+}
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} TEST(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
