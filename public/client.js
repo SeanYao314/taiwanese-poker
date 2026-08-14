@@ -30,6 +30,59 @@
   const SLOT_TITLES = { one: '1-Card Hand', two: '2-Card Hand', four: '4-Card PLO Hand' };
   const STORAGE_KEY = 'taiwanese-poker-session';
 
+  // ---------- card sorting ----------
+  // A shared display preference (not per-hand state) for how "your cards" areas lay
+  // themselves out: 'dealt' (whatever order the server sent, i.e. unsorted), 'rank'
+  // (high to low, ties broken by suit), or 'suit' (grouped s/h/d/c, high to low within
+  // each suit). Applies to the live game's tray, Practice Mode's tray, and Homerun
+  // Pineapple's discard screen — anywhere you're looking at a raw pile of your own cards
+  // deciding what to do with them. Doesn't touch cards already placed into hand slots —
+  // those stay in the order you put them, since reordering a hand you've already built
+  // would just be confusing. Persisted across visits like the sound preference.
+  const CARD_SORT_KEY = 'taiwanese-poker-card-sort';
+  const RANK_ORDER = '23456789TJQKA';
+  const SUIT_ORDER = ['s', 'h', 'd', 'c'];
+  let cardSortMode = 'dealt';
+  try {
+    const savedSort = localStorage.getItem(CARD_SORT_KEY);
+    if (savedSort === 'rank' || savedSort === 'suit' || savedSort === 'dealt') cardSortMode = savedSort;
+  } catch (e) { /* localStorage unavailable — default stays 'dealt' */ }
+
+  function sortCards(cards, mode) {
+    if (mode !== 'rank' && mode !== 'suit') return cards; // 'dealt' — leave as-is
+    const arr = cards.slice();
+    const rankOf = (c) => RANK_ORDER.indexOf(c[0]);
+    const suitOf = (c) => SUIT_ORDER.indexOf(c[1]);
+    if (mode === 'rank') {
+      arr.sort((a, b) => rankOf(b) - rankOf(a) || suitOf(a) - suitOf(b));
+    } else {
+      arr.sort((a, b) => suitOf(a) - suitOf(b) || rankOf(b) - rankOf(a));
+    }
+    return arr;
+  }
+
+  // Wires up a "Sort: Dealt / Rank / Suit" button group inside `containerId`. Clicking a
+  // button updates the shared cardSortMode, persists it, keeps every such control on the
+  // page in sync (even ones on screens not currently visible), and re-renders whichever
+  // screen this particular control belongs to via `onChange`.
+  function wireSortControl(containerId, onChange) {
+    const container = el(containerId);
+    if (!container) return;
+    function syncActiveStates() {
+      document.querySelectorAll('.sort-btn').forEach((b) => b.classList.toggle('active', b.dataset.sort === cardSortMode));
+    }
+    container.querySelectorAll('.sort-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.sort === cardSortMode) return;
+        cardSortMode = btn.dataset.sort;
+        try { localStorage.setItem(CARD_SORT_KEY, cardSortMode); } catch (e) { /* ignore */ }
+        syncActiveStates();
+        onChange();
+      });
+    });
+    syncActiveStates();
+  }
+
   const el = (id) => document.getElementById(id);
   const show = (id) => el(id).classList.remove('hidden');
   const hide = (id) => el(id).classList.add('hidden');
@@ -302,7 +355,7 @@
 
   function trayCards() {
     const used = new Set([...state.assignment.one, ...state.assignment.two, ...state.assignment.four]);
-    return state.myHand.filter((c) => !used.has(c));
+    return sortCards(state.myHand.filter((c) => !used.has(c)), cardSortMode);
   }
 
   function renderGame() {
@@ -462,7 +515,7 @@
     ['one', 'two', 'four'].forEach((cat) => {
       const container = el('discardSlot' + capitalize(cat));
       container.innerHTML = '';
-      state.assignment[cat].forEach((c) => {
+      sortCards(state.assignment[cat], cardSortMode).forEach((c) => {
         const cardNode = cardEl(c);
         if (state.discardSelections[cat] === c) cardNode.classList.add('marked-discard');
         if (!waiting) {
@@ -1041,7 +1094,7 @@
 
   function practiceTrayCards() {
     const used = new Set([...practice.assignment.one, ...practice.assignment.two, ...practice.assignment.four]);
-    return practice.hand.filter((c) => !used.has(c));
+    return sortCards(practice.hand.filter((c) => !used.has(c)), cardSortMode);
   }
 
   function renderPracticeArranger() {
@@ -1732,6 +1785,15 @@
       if (isHost) show('btnNextHand'); else hide('btnNextHand');
     }
   }
+
+  // Wire up every "Sort: Dealt / Rank / Suit" control on the page. Each one re-renders
+  // only its own screen — renderGame/renderPracticeArranger/renderDiscardScreen are each
+  // guarded internally against running before that screen has real state to show, and
+  // since a hidden screen's buttons can't be clicked (`.hidden` is display:none), the
+  // right one always fires.
+  wireSortControl('gameSortControl', renderGame);
+  wireSortControl('practiceSortControl', renderPracticeArranger);
+  wireSortControl('discardSortControl', renderDiscardScreen);
 
   // ---------- boot / rejoin ----------
   const params = new URLSearchParams(location.search);

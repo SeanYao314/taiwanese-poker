@@ -282,6 +282,23 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .slot-cards { display: flex; flex-wrap: wrap; gap: 6px; min-height: 76px; }
 
 .tray-wrap { margin-bottom: 18px; }
+.tray-title-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
+
+.sort-control { display: inline-flex; align-items: center; gap: 4px; }
+.sort-label { font-weight: 600; color: var(--muted); font-size: .78rem; margin-right: 2px; }
+.sort-btn {
+  background: #eef0f2;
+  color: var(--ink);
+  border: none;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: .75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sort-btn:hover { filter: brightness(0.96); }
+.sort-btn.active { background: var(--felt); color: #fff; }
+#discardSortControl { display: flex; margin-bottom: 12px; }
 .tray {
   display: flex;
   flex-wrap: wrap;

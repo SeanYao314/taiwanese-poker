@@ -150,7 +150,15 @@
       </div>
 
       <div class="tray-wrap">
-        <div class="slot-title">Your Cards <span class="hint-inline">(click a card, then click a hand above &mdash; or &#8984;/Ctrl+click a card to drop it in the first open slot)</span></div>
+        <div class="slot-title tray-title-row">
+          <span>Your Cards <span class="hint-inline">(click a card, then click a hand above &mdash; or &#8984;/Ctrl+click a card to drop it in the first open slot)</span></span>
+          <span class="sort-control" id="gameSortControl">
+            <span class="sort-label">Sort:</span>
+            <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
+            <button type="button" class="sort-btn" data-sort="rank">Rank</button>
+            <button type="button" class="sort-btn" data-sort="suit">Suit</button>
+          </span>
+        </div>
         <div class="tray" id="tray"></div>
       </div>
 
@@ -170,6 +178,13 @@
         <div id="discardLockStatus" class="lock-status"></div>
       </div>
       <p class="hint" style="margin-top:-6px;">The flop is in. Click one card in each hand below to discard it — whatever's left becomes your final 1/2/4-card hands, and it plays out like a normal Homerun hand from there.</p>
+
+      <span class="sort-control" id="discardSortControl">
+        <span class="sort-label">Sort:</span>
+        <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
+        <button type="button" class="sort-btn" data-sort="rank">Rank</button>
+        <button type="button" class="sort-btn" data-sort="suit">Suit</button>
+      </span>
 
       <div class="boards-row" id="discardBoardsRow"></div>
 
@@ -265,7 +280,15 @@
       </div>
 
       <div class="tray-wrap">
-        <div class="slot-title">Your Cards <span class="hint-inline">(click a card, then click a hand above &mdash; or &#8984;/Ctrl+click a card to drop it in the first open slot)</span></div>
+        <div class="slot-title tray-title-row">
+          <span>Your Cards <span class="hint-inline">(click a card, then click a hand above &mdash; or &#8984;/Ctrl+click a card to drop it in the first open slot)</span></span>
+          <span class="sort-control" id="practiceSortControl">
+            <span class="sort-label">Sort:</span>
+            <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
+            <button type="button" class="sort-btn" data-sort="rank">Rank</button>
+            <button type="button" class="sort-btn" data-sort="suit">Suit</button>
+          </span>
+        </div>
         <div class="tray" id="pTray"></div>
       </div>
 
