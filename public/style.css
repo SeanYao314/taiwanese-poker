@@ -185,6 +185,8 @@ h3 { margin: 22px 0 10px; font-size: 1.05rem; }
 }
 .homerun-tag.pineapple-tag { background: #ffd76e; }
 .homerun-mode-badge.pineapple-badge { background: #fff0d0; border-color: #f5c86a; }
+.homerun-tag.redriver-tag { background: #9fd3ff; color: #0a3a66; }
+.homerun-mode-badge.redriver-badge { background: #eaf5ff; color: #0a3a66; border-color: #9fd3ff; }
 
 button.primary {
   background: var(--felt);
@@ -359,7 +361,10 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .boards-row { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 24px; }
 .board-block { flex: 1; min-width: 260px; }
 .board-block h4 { margin: 0 0 8px; }
-.board-cards { display: flex; gap: 6px; }
+.board-cards { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Red River "ocean" cards (anything past the base 5) get a subtle blue ring so it's
+   obvious at a glance which cards only exist because the river came up red. */
+.playing-card.ocean-card { box-shadow: 0 0 0 2px var(--suit-diamond) inset, 0 2px 4px rgba(0,0,0,.15); }
 
 .player-result {
   border: 1px solid #e5e7eb;

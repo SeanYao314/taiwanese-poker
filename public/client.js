@@ -251,7 +251,8 @@
     const maxPlayers = Number(el('createMax').value);
     const variant = el('variantPineapple').checked ? 'pineapple' : 'standard';
     const homerunMode = el('createHomerun').checked;
-    const res = await api('/api/create_room', { name, maxPlayers, variant, homerunMode });
+    const redRiver = el('createRedRiver').checked;
+    const res = await api('/api/create_room', { name, maxPlayers, variant, homerunMode, redRiver });
     if (!res.ok) return landingError(res.error);
     state.code = res.code; state.playerId = res.playerId; state.token = res.token; state.name = name;
     saveSession();
@@ -303,6 +304,8 @@
       hide('lobbyPineappleBadge');
       if (room.homerunMode) show('lobbyHomerunBadge'); else hide('lobbyHomerunBadge');
     }
+    // Independent of variant — can show alongside either badge above.
+    if (room.redRiverMode) show('lobbyRedRiverBadge'); else hide('lobbyRedRiverBadge');
     const list = el('lobbyPlayers');
     list.innerHTML = '';
     room.players.forEach((p) => {
@@ -363,6 +366,7 @@
     const isPineapple = state.room && state.room.variant === 'pineapple';
     if (state.room && state.room.homerunMode && !isPineapple) show('gameHomerunTag'); else hide('gameHomerunTag');
     if (isPineapple) show('gamePineappleTag'); else hide('gamePineappleTag');
+    if (state.room && state.room.redRiverMode) show('gameRedRiverTag'); else hide('gameRedRiverTag');
 
     const cap = liveCapacity();
     el('slotTitleOne').textContent = isPineapple ? `${cap.one}-Card Hand (discard 1 after the flop)` : '1-Card Hand';
@@ -507,6 +511,7 @@
 
   function renderDiscardScreen() {
     el('discardHandNumber').textContent = state.room ? state.room.handNumber : '';
+    if (state.room && state.room.redRiverMode) show('discardRedRiverTag'); else hide('discardRedRiverTag');
     renderDiscardBoards(state.flop);
 
     const waiting = state.discardLocked;
@@ -643,15 +648,21 @@
     // Stages 1-3, run once per board: reveal that board's cards, reveal what everyone
     // made on it, then step through that board's comparisons live with point swings
     // posted on the spot.
-    function queueBoardStages(boardIdx, label) {
+    function queueBoardStages(boardIdx, baseLabel) {
       const comparisonsForBoard = r.comparisons.filter((c) => c.boardIndex === boardIdx);
+      // Red River: a board can come in longer than the base 5 cards — flag it right in
+      // the board's own label so it's obvious why there are extra cards to watch land.
+      const oceanCount = Math.max(0, r.boards[boardIdx].length - 5);
+      const label = oceanCount > 0
+        ? `${baseLabel} — 🌊 Red River! +${oceanCount} ocean card${oceanCount === 1 ? '' : 's'}`
+        : baseLabel;
 
       queue.push({
         delay: 500,
-        run: () => { el('revealStatus').textContent = `Revealing ${label}…`; ensureBoardBlock(boardIdx, label); }
+        run: () => { el('revealStatus').textContent = `Revealing ${baseLabel}…`; ensureBoardBlock(boardIdx, label); }
       });
-      r.boards[boardIdx].forEach((c) => {
-        queue.push({ delay: 220, run: () => appendBoardCard(boardIdx, c) });
+      r.boards[boardIdx].forEach((c, cardIdx) => {
+        queue.push({ delay: 220, run: () => appendBoardCard(boardIdx, c, cardIdx) });
       });
 
       queue.push({ delay: 400, run: () => { el('revealStatus').textContent = `What's everyone making on ${label}?`; } });
@@ -717,10 +728,13 @@
     el('boardsRow').appendChild(block);
   }
 
-  function appendBoardCard(boardIdx, card) {
+  function appendBoardCard(boardIdx, card, cardIdx) {
     const cardsDiv = el('boardCards' + boardIdx);
     const node = cardEl(card);
     node.classList.add('card-reveal');
+    // Red River: anything past index 4 (the base river) only exists because of the
+    // modifier — ring it so it reads as "ocean card" at a glance.
+    if (typeof cardIdx === 'number' && cardIdx >= 5) node.classList.add('ocean-card');
     cardsDiv.appendChild(node);
   }
 
@@ -924,9 +938,13 @@
 
     const cellPoints = {};
     [0, 1].forEach((boardIdx) => {
-      const label = boardIdx === 0 ? 'Board A' : 'Board B';
+      const baseLabel = boardIdx === 0 ? 'Board A' : 'Board B';
+      const oceanCount = Math.max(0, r.boards[boardIdx].length - 5);
+      const label = oceanCount > 0
+        ? `${baseLabel} — 🌊 Red River! +${oceanCount} ocean card${oceanCount === 1 ? '' : 's'}`
+        : baseLabel;
       ensureBoardBlock(boardIdx, label);
-      r.boards[boardIdx].forEach((c) => appendBoardCard(boardIdx, c));
+      r.boards[boardIdx].forEach((c, cardIdx) => appendBoardCard(boardIdx, c, cardIdx));
       r.players.forEach((p) => {
         ['one', 'two', 'four'].forEach((cat) => revealPlayerBoardHand(r, p, cat, boardIdx));
       });
@@ -1013,6 +1031,27 @@
   // same trial data, not a re-deal) and persists as a sticky setting across New Hand
   // clicks until the user changes it.
   let practiceHomerunMode = false;
+
+  // Red River modifier (see lib/game.js for the live-game version of the same rule):
+  // unlike homerunMode, this changes the actual cards on every trial's boards, so it
+  // can't be re-applied instantly to already-generated trials — like practiceTrialTarget,
+  // it's a sticky setting that only takes effect starting with the next New Hand.
+  let practiceRedRiverMode = false;
+
+  // Pure, same cascade rule as lib/game.js's applyRedRiverRule: keep appending cards from
+  // `pool` (in order) onto `board` while the most recently added card is red, stopping the
+  // moment a black one lands (or the pool runs out). Duplicated here in just a few lines
+  // rather than served from lib/game.js, matching how this file already duplicates the
+  // rest of the dealing/scoring logic it needs client-side (see buildPracticeTrials).
+  function applyRedRiverRule(board, pool) {
+    const extended = board.slice();
+    let used = 0;
+    while (extended.length > 0 && window.Poker.isRed(extended[extended.length - 1]) && used < pool.length) {
+      extended.push(pool[used]);
+      used += 1;
+    }
+    return { board: extended, used };
+  }
   const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
   let opponentPool = null; // cached after first fetch
   let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
@@ -1033,7 +1072,7 @@
     return a;
   }
 
-  function buildPracticeTrials(playerHand, pool, trialCount) {
+  function buildPracticeTrials(playerHand, pool, trialCount, redRiver) {
     const playerSet = new Set(playerHand);
     const qualifying = pool.filter((entry) => {
       const oppHand = [...entry.one, ...entry.two, ...entry.four];
@@ -1059,8 +1098,18 @@
       const oppHand = [...entry.one, ...entry.two, ...entry.four];
       const oppSet = new Set([...playerHand, ...oppHand]);
       const remaining = shuffleArray(window.Poker.freshDeck().filter((c) => !oppSet.has(c)));
-      const boardA = remaining.slice(0, 5);
-      const boardB = remaining.slice(5, 10);
+      let boardA = remaining.slice(0, 5);
+      let boardB = remaining.slice(5, 10);
+      if (redRiver) {
+        // Same ordering as lib/game.js's dealHand: extend board A fully from whatever's
+        // left in the deck, then board B from whatever's left after that.
+        let idx = 10;
+        const extA = applyRedRiverRule(boardA, remaining.slice(idx));
+        boardA = extA.board;
+        idx += extA.used;
+        const extB = applyRedRiverRule(boardB, remaining.slice(idx));
+        boardB = extB.board;
+      }
       return { oppSplit: entry, boardA, boardB };
     });
   }
@@ -1074,7 +1123,7 @@
 
     const pool = await loadOpponentPool();
     const hand = window.Poker.shuffle(window.Poker.freshDeck()).slice(0, 7);
-    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget);
+    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget, practiceRedRiverMode);
 
     practice = {
       hand,
@@ -1735,6 +1784,16 @@
         idealBtn.disabled = false;
         idealBtn.textContent = 'Show Ideal Split';
       }
+    });
+  }
+
+  // Red River: sticky like the trial-count slider, not instant like homerun mode below —
+  // it changes what's actually on each trial's boards, so there's nothing to re-score
+  // until the next New Hand regenerates them.
+  const redRiverToggleEl = el('practiceRedRiverToggle');
+  if (redRiverToggleEl) {
+    redRiverToggleEl.addEventListener('change', () => {
+      practiceRedRiverMode = redRiverToggleEl.checked;
     });
   }
 

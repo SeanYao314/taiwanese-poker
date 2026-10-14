@@ -58,6 +58,10 @@
           <input id="createHomerun" type="checkbox" />
           <span>Homerun scoring <span class="hint-inline">(sweep all 6 comparisons vs an opponent &mdash; both boards, all 3 hands, no ties &mdash; and the whole match total against them doubles)</span></span>
         </label>
+        <label class="checkbox-label" id="createRedRiverRow">
+          <input id="createRedRiver" type="checkbox" />
+          <span>Red River <span class="hint-inline">(if a board's river comes up red, deal another card &mdash; "the ocean" &mdash; and keep going while it's red; stops the moment one lands black. Works with either variant above.)</span></span>
+        </label>
         <button id="btnCreate" class="primary">Create Room</button>
       </div>
 
@@ -106,6 +110,18 @@
         <li>From there it plays exactly like a normal Homerun hand with your final 1/2/4-card hands: two full boards, all the usual comparisons, and <strong>homerun scoring is always on</strong> for this variant (sweep all 6 comparisons vs. an opponent to double that match's total, 12&rarr;24).</li>
       </ul>
     </details>
+
+    <details class="rules-box">
+      <summary>How Red River works</summary>
+      <ul>
+        <li>It's an independent modifier, not a variant &mdash; check the box at room creation and it applies on top of either Standard or Homerun Pineapple.</li>
+        <li>Each board's 5th card is its <strong>river</strong>. If the river is red (&hearts; or &#9830;), another card &mdash; <strong>the ocean</strong> &mdash; gets dealt right onto the end of that board.</li>
+        <li>If the ocean is <em>also</em> red, another one gets dealt, and so on. The cascade only stops the moment a card lands black &mdash; that black card stays on the board as its new last card.</li>
+        <li>Each board (A and B) rolls its own cascade completely independently, so one board can end up longer than the other, or neither might extend at all (roughly 50/50 odds of at least one extra card on any given board).</li>
+        <li>Nothing about this changes hand construction: the 1-card and 2-card hands are still "best 5 of the pool," and the 4-card PLO hand still uses exactly 2 of your cards + exactly 3 board cards &mdash; there just might be more than 5 board cards to choose those 3 from.</li>
+        <li>Every extra card is dealt and fixed before anyone acts, same as the rest of the board &mdash; it's revealed at showdown, nothing about your decisions changes which cards show up.</li>
+      </ul>
+    </details>
   </section>
 
   <!-- LOBBY -->
@@ -119,6 +135,7 @@
       </div>
       <p id="lobbyPineappleBadge" class="homerun-mode-badge pineapple-badge hidden">🍍⚾ Homerun Pineapple &mdash; 10 cards, discard after the flop, homerun scoring always on</p>
       <p id="lobbyHomerunBadge" class="homerun-mode-badge hidden">⚾ Homerun scoring is ON for this room</p>
+      <p id="lobbyRedRiverBadge" class="homerun-mode-badge redriver-badge hidden">🌊 Red River is ON &mdash; red rivers keep dealing oceans until one lands black</p>
       <h3>Players (<span id="lobbyCount"></span>/<span id="lobbyMax"></span>)</h3>
       <ul id="lobbyPlayers" class="player-list"></ul>
       <button id="btnStart" class="primary hidden">Start Game</button>
@@ -130,7 +147,7 @@
   <section id="screen-game" class="screen hidden">
     <div class="card-panel wide">
       <div class="game-header">
-        <h2>Hand #<span id="handNumber"></span> <span id="gameHomerunTag" class="homerun-tag hidden">⚾ HOMERUN MODE</span> <span id="gamePineappleTag" class="homerun-tag pineapple-tag hidden">🍍 PINEAPPLE — pre-flop</span></h2>
+        <h2>Hand #<span id="handNumber"></span> <span id="gameHomerunTag" class="homerun-tag hidden">⚾ HOMERUN MODE</span> <span id="gamePineappleTag" class="homerun-tag pineapple-tag hidden">🍍 PINEAPPLE — pre-flop</span> <span id="gameRedRiverTag" class="homerun-tag redriver-tag hidden">🌊 RED RIVER</span></h2>
         <div id="lockStatus" class="lock-status"></div>
       </div>
 
@@ -174,7 +191,7 @@
   <section id="screen-discard" class="screen hidden">
     <div class="card-panel wide">
       <div class="game-header">
-        <h2>Hand #<span id="discardHandNumber"></span> <span class="homerun-tag pineapple-tag">🍍 PINEAPPLE — discard round</span></h2>
+        <h2>Hand #<span id="discardHandNumber"></span> <span class="homerun-tag pineapple-tag">🍍 PINEAPPLE — discard round</span> <span id="discardRedRiverTag" class="homerun-tag redriver-tag hidden">🌊 RED RIVER</span></h2>
         <div id="discardLockStatus" class="lock-status"></div>
       </div>
       <p class="hint" style="margin-top:-6px;">The flop is in. Click one card in each hand below to discard it — whatever's left becomes your final 1/2/4-card hands, and it plays out like a normal Homerun hand from there.</p>
@@ -258,6 +275,11 @@
         <input type="range" id="practiceTrialsRange" />
         <span class="hint-inline">Logarithmic slider, 100&ndash;10,000 &mdash; controls the EV/variance panel. "Show Ideal Split" always caps itself at 1,000 boards (the answer stops changing well before that many), so it stays fast no matter how high you set this. Applies on your next New Hand.</span>
       </div>
+
+      <label class="checkbox-label practice-homerun-toggle">
+        <input type="checkbox" id="practiceRedRiverToggle" />
+        <span>Red River <span class="hint-inline">(if a trial's river comes up red, deal another "ocean" card and keep going while it's red, stopping on the first black one &mdash; same rule as the live-game modifier. Changes the actual boards, so it applies on your next New Hand, not instantly.)</span></span>
+      </label>
 
       <label class="checkbox-label practice-homerun-toggle">
         <input type="checkbox" id="practiceHomerunToggle" />

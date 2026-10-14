@@ -53,7 +53,8 @@ function publicRoomState(room) {
     players: room.players.map(publicPlayer),
     cumulative: room.cumulative,
     homerunMode: room.homerunMode,
-    variant: room.variant
+    variant: room.variant,
+    redRiverMode: room.redRiverMode
   };
 }
 
@@ -95,7 +96,7 @@ function dealNewHand(room) {
   room.handNumber += 1;
   const ids = room.players.map((p) => p.id);
   const handSize = room.variant === 'pineapple' ? 10 : 7;
-  const { hands, boards } = G.dealHand(ids, handSize);
+  const { hands, boards } = G.dealHand(ids, handSize, { redRiver: room.redRiverMode });
   room.boards = boards;
   room.phase = 'arranging';
   for (const p of room.players) {
@@ -231,7 +232,10 @@ const API_HANDLERS = {
       // Homerun Pineapple always scores with the homerun sweep bonus — it's part of what
       // makes it that variant, not an independent option. Standard games still pick their
       // own homerunMode via the checkbox.
-      homerunMode: variant === 'pineapple' ? true : !!body.homerunMode
+      homerunMode: variant === 'pineapple' ? true : !!body.homerunMode,
+      // Red River is an independent board modifier — it works the same way with either
+      // variant, so it isn't tied to the variant radio at all like homerunMode is.
+      redRiverMode: !!body.redRiver
     };
     rooms.set(code, room);
     return { ok: true, code, playerId: id, token };

@@ -35,6 +35,18 @@ Picked at room creation (**Game Variant: Standard** vs. **Homerun Pineapple**), 
 
 This variant is intentionally **not** wired into Practice Mode or the `experiments/solve/` strategy research yet — no pre-solved opponent pool or EV tooling exists for the bigger pre-flop decision + discard step, so it's live-room-only for now.
 
+### Optional: Red River modifier
+
+A **Red River** checkbox at room creation, independent of the Game Variant radio above it — it's a board modifier, not a variant of its own, so it works on top of either Standard or Homerun Pineapple:
+
+- Each board's 5th card is its **river**. If the river is red (♥ or ♦), one more card — **the ocean** — gets dealt right onto the end of that board.
+- If the ocean is *also* red, another one gets dealt, and so on — the cascade only stops the moment a card lands **black**, and that black card stays on the board as its new last card.
+- Board A and Board B each roll their own cascade completely independently, so one can end up longer than the other, or neither might extend at all. Since each extra card is roughly a coin flip, about half of all boards need no extension, about a quarter get exactly one ocean card, about an eighth get two, and so on — long cascades are rare but never impossible (there's no hard cap; see `lib/game.js`'s `applyRedRiverRule` for the exact rule and why it's left uncapped).
+- Every ocean card is dealt and fixed at the very start of the hand, before anyone has acted — same as the rest of the board. Nothing about anyone's betting/arranging decisions changes which cards show up; they're just hidden until the results reveal, same as any other board card.
+- Hand construction doesn't change at all: the 1-card and 2-card hands are still "best 5 of the pool," and the 4-card PLO hand still uses exactly 2 of your cards + exactly 3 board cards — there just might be more than 5 board cards to choose those 3 from. `lib/poker.js`'s `bestGeneric`/`bestPLO` already operated on "however many cards are in this array," so the scoring engine needed zero changes for this — only the dealing step needed to know how to grow a board.
+- On the results screen, a board that extended gets flagged right in its own header (e.g. "Board A — 🌊 Red River! +2 ocean cards"), and every ocean card gets a subtle blue ring so it's obvious at a glance which cards only exist because of the modifier.
+- Unlike Homerun Pineapple, Red River **is** wired into Practice Mode — see below.
+
 ## Running it locally
 
 Requires Node.js 18+ (no other dependencies).
@@ -53,7 +65,7 @@ node tests/poker.test.js
 
 ## How the game works
 
-1. One player creates a room (picks a max player count, 2–4, and a **Game Variant** — Standard or Homerun Pineapple, see below) and gets a 4-character room code plus a shareable link.
+1. One player creates a room (picks a max player count, 2–4, a **Game Variant** — Standard or Homerun Pineapple, and optionally the **Red River** board modifier, see below) and gets a 4-character room code plus a shareable link.
 2. Others join with that code from the landing page's "Join Room" tab.
 3. Once at least 2 players have joined, the host clicks **Start Game** — everyone is privately dealt 7 cards (10 for Homerun Pineapple).
 4. Each player clicks a card to select it, then clicks the hand box to place it there (click a placed card to send it back). **Lock Hand** becomes available once every card is assigned.
@@ -97,6 +109,8 @@ The opponent pool itself ships as `public/opponent-pool.json`, built by `experim
 A **Homerun scoring** checkbox on the practice screen applies the exact same rule as live games (sweep all 6 comparisons against this opponent, both boards, no ties, and the match total doubles 12→24). It takes effect instantly — no need to deal a new hand — re-scoring your current arrangement and every saved split against the same trial data, plus a "swept X/N boards" line so you can see how often a given split actually connects for the bonus. **Show Ideal Split** also respects it: the search itself optimizes for homerun-inclusive EV when the toggle is on, not just raw comparison points, since a split that sets up more sweeps can beat a higher-raw-EV split once the bonus is in play.
 
 One honest caveat: toggling this only changes how *your* trials are scored — the opponent's own split in each trial still comes from the standard-solved pool, since that's the only data available (the earlier homerun-equilibrium research in `experiments/solve/round1_hr.json` etc. predates the corrected homerun rule and isn't reused here — see the homerun section above). So the opponent isn't adapting to homerun scoring the way a truly homerun-optimal opponent would; it's still a strong, standard-optimal opponent, just with the score kept homerun-style.
+
+A **Red River** checkbox is also on the practice screen, applying the exact same cascading-ocean-card rule described above to every one of your trial boards. Unlike the Homerun toggle, it can't take effect instantly — it changes the actual cards each trial's boards are made of, not just how a fixed set of trials gets scored — so, like the board-count slider, it's a sticky setting that applies starting with your next **New Hand**. "Show Ideal Split" automatically searches against whichever boards are currently loaded, Red River or not, with no changes needed to the search itself (same successive-halving algorithm, just occasionally longer boards to evaluate per partition). Because longer boards cost a bit more to evaluate (more 5-card combinations to check per board), expect the Ideal Split search to run somewhat slower with Red River on than the timings quoted above — still well within a comparable ballpark at the default settings.
 
 ## Deploying so friends can join over the internet
 
