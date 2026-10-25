@@ -44,24 +44,30 @@ function pointsFromEvals(myEvals, oppEvals) {
 }
 
 const STANDARD_TOTAL = POINTS.one + POINTS.two + POINTS.four; // 6
+const MATCH_TOTAL = STANDARD_TOTAL * 2; // 12 — full-match swing against one opponent
 
-// Homerun scoring: a board where you beat the opponent in all 3 categories (no ties)
-// doubles that board's points (6 -> 12); losing all 3 costs you -12 instead of -6.
-// Anything mixed scores normally.
+// Homerun scoring, matching the live site's actual rule (lib/game.js's computeResults):
+// sweeping ALL 6 comparisons against this opponent -- all 3 categories, on BOTH boards,
+// with no ties anywhere -- doubles the WHOLE match total (12 -> 24). Sweeping just one
+// board is NOT enough on its own and scores normally, with no bonus. (An earlier version
+// of this file doubled per-board, which was a different and incorrect rule -- see
+// round*_hr_legacy_perboard.json for what that produced.)
 function pointsHomerun(myEvals, oppEvals) {
   let total = 0;
-  for (let b = 0; b < 2; b++) {
-    const cmps = ['one', 'two', 'four'].map((cat) => P.compareScores(myEvals[cat][b], oppEvals[cat][b]));
-    if (cmps.every((c) => c > 0)) total += STANDARD_TOTAL * 2;
-    else if (cmps.every((c) => c < 0)) total -= STANDARD_TOTAL * 2;
-    else {
-      cmps.forEach((c, idx) => {
-        const cat = ['one', 'two', 'four'][idx];
-        if (c > 0) total += POINTS[cat];
-        else if (c < 0) total -= POINTS[cat];
-      });
+  let allWon = true;
+  let allLost = true;
+  for (const cat of ['one', 'two', 'four']) {
+    for (let b = 0; b < 2; b++) {
+      const cmp = P.compareScores(myEvals[cat][b], oppEvals[cat][b]);
+      const pts = POINTS[cat];
+      if (cmp > 0) total += pts;
+      else if (cmp < 0) total -= pts;
+      if (cmp <= 0) allWon = false;
+      if (cmp >= 0) allLost = false;
     }
   }
+  if (allWon) total += MATCH_TOTAL;
+  else if (allLost) total -= MATCH_TOTAL;
   return total;
 }
 

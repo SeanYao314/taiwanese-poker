@@ -1037,9 +1037,10 @@
 
   // Matches lib/game.js's rule exactly: sweeping all 6 comparisons against this one
   // opponent (both boards, all 3 hand sizes, no ties anywhere) doubles the match total
-  // for that trial, 12 -> 24 (or -24 if you're the one swept). The opponent's split
-  // itself is still the standard-solved one from opponent-pool.json — homerun mode
-  // changes how a given trial gets scored, not who you're playing against.
+  // for that trial, 12 -> 24 (or -24 if you're the one swept). The opponent's split in
+  // opponent-pool.json is itself solved for this same homerun rule (see
+  // experiments/solve/solve_round_hr.js and solve_fixed_hr.js) — not a standard-rules
+  // opponent that just happens to get scored with the bonus on top.
   const PRACTICE_MATCH_TOTAL = (PRACTICE_POINTS.one + PRACTICE_POINTS.two + PRACTICE_POINTS.four) * 2;
 
   // Score `assignment` against one trial's fixed opponent + boards. Returns the point

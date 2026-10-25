@@ -1,6 +1,7 @@
-// "Homerun" modifier: on a given board, if you beat the opponent in ALL 3 categories
-// (1-card, 2-card, 4-card) with no ties, that board's points DOUBLE (6 -> 12). Same if
-// you lose all 3 -- you get hit for -12 instead of -6. Mixed boards score normally.
+// "Homerun" modifier, matching the live site's actual rule (lib/game.js's
+// computeResults): sweeping ALL 6 comparisons against this opponent -- all 3
+// categories, on BOTH boards, with no ties anywhere -- doubles the WHOLE match total
+// (12 -> 24). Sweeping just one board is NOT enough on its own and scores normally.
 // This script computes, for the SAME hand + SAME trial data, both the standard-optimal
 // and homerun-optimal partition, so the comparison is apples-to-apples.
 const fs = require('fs');
@@ -15,23 +16,26 @@ const oppTable = JSON.parse(fs.readFileSync(oppTableFile, 'utf8'));
 
 const POINTS = { one: 1, two: 2, four: 3 };
 const STANDARD_TOTAL = POINTS.one + POINTS.two + POINTS.four; // 6
+const MATCH_TOTAL = STANDARD_TOTAL * 2; // 12
 
 function pointsHomerun(myEvals, oppEvals) {
   let total = 0;
-  let homeruns = 0; // boards where I swept all 3
-  let gotHomeruned = 0; // boards where opponent swept all 3
-  for (let b = 0; b < 2; b++) {
-    const cmps = ['one', 'two', 'four'].map((cat) => P.compareScores(myEvals[cat][b], oppEvals[cat][b]));
-    if (cmps.every((c) => c > 0)) { total += STANDARD_TOTAL * 2; homeruns++; }
-    else if (cmps.every((c) => c < 0)) { total -= STANDARD_TOTAL * 2; gotHomeruned++; }
-    else {
-      cmps.forEach((c, idx) => {
-        const cat = ['one', 'two', 'four'][idx];
-        if (c > 0) total += POINTS[cat];
-        else if (c < 0) total -= POINTS[cat];
-      });
+  let allWon = true;
+  let allLost = true;
+  for (const cat of ['one', 'two', 'four']) {
+    for (let b = 0; b < 2; b++) {
+      const cmp = P.compareScores(myEvals[cat][b], oppEvals[cat][b]);
+      const pts = POINTS[cat];
+      if (cmp > 0) total += pts;
+      else if (cmp < 0) total -= pts;
+      if (cmp <= 0) allWon = false;
+      if (cmp >= 0) allLost = false;
     }
   }
+  const homeruns = allWon ? 1 : 0; // I swept this match (both boards)
+  const gotHomeruned = allLost ? 1 : 0; // opponent swept this match
+  if (allWon) total += MATCH_TOTAL;
+  else if (allLost) total -= MATCH_TOTAL;
   return { total, homeruns, gotHomeruned };
 }
 
@@ -89,7 +93,7 @@ for (let i = from; i < to; i++) {
     }
     const stdEv = stdTotal / trials.length;
     const hrEv = hrTotal / trials.length;
-    const homerunRate = hrCount / (trials.length * 2); // per board
+    const homerunRate = hrCount / trials.length; // per match (at most 1 per trial now)
     perPartitionHR.push({ key: canonicalKey(part), homerunRate });
 
     if (stdEv > bestStd.ev) bestStd = { ev: stdEv, partition: part, key: canonicalKey(part) };
@@ -112,7 +116,7 @@ for (let i = from; i < to; i++) {
     homerunBest: { partition: bestHR.partition, ev: bestHR.ev, key: bestHR.key, homerunRate: bestHR.homerunRate },
     standardPartitionUnderHomerunRule: {
       ev: stdPartitionHrTotal / trials.length,
-      homerunRate: stdPartitionHrCount / (trials.length * 2)
+      homerunRate: stdPartitionHrCount / trials.length
     }
   };
 
