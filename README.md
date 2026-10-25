@@ -37,8 +37,13 @@ Then open `http://localhost:3000` in a browser. Open it in a couple more tabs (o
 Run the sanity test suite any time with:
 
 ```bash
-node tests/poker.test.js
+node tests/poker.test.js          # dependency-free: evaluator + scoring engine
+node tests/rapid_fire_ui.test.js  # drives Rapid Fire in real Chromium (needs playwright)
 ```
+
+`poker.test.js` has no dependencies at all. `rapid_fire_ui.test.js` needs `playwright` with a
+Chromium available and starts/stops its own server; if playwright isn't installed it skips
+itself rather than failing.
 
 ## How the game works
 
@@ -86,6 +91,48 @@ The opponent pool itself ships as `public/opponent-pool.json`, built by `experim
 Homerun scoring is always included here too, the same as in live games — there's no toggle for it. Every EV number on the practice screen already factors in the sweep bonus (sweep all 6 comparisons against this opponent, both boards, no ties, and the match total doubles 12→24), and a "swept X/N boards" line shows how often a given split actually connects for it. **Show Ideal Split** is homerun-aware too: the search itself optimizes for homerun-inclusive EV, not just raw comparison points, since a split that sets up more sweeps can beat a higher-raw-EV split once the bonus is in play.
 
 The opponent itself is homerun-aware too, not just the scoring: `public/opponent-pool.json` is solved by `experiments/solve/solve_round_hr.js` + `solve_fixed_hr.js` under the exact same full-match-sweep homerun rule the live game uses, so the opponent you're practicing against has actually adapted its splits to the sweep bonus, not just a standard-optimal opponent with the bonus tacked onto the scoring. See "Strategy research" below for how that pool was solved.
+
+## Rapid Fire (GTO drill)
+
+The landing page's **Rapid Fire** tab is a fast drill on the only real decision this game
+has: given 7 cards, which 1/2/4 split is best? You get a hand and five candidate splits, and
+you pick the one you think has the highest EV — with the number keys, which is what makes it
+rapid. A correct pick chimes and deals the next hand automatically; a miss waits, so you can
+actually study the better split before it disappears.
+
+Everything is graded live rather than looked up. When a hand comes up, 14 candidate splits
+are scored against the same 120 board runouts, against the same homerun-solved opponents
+Practice Mode plays (the full-match-sweep homerun bonus included, since that's always on).
+One of the candidates is always the offline solver's own pick for that hand, since the quiz
+hands are drawn from the solved pool itself. The five you actually see are the top three
+plus a mid-pack and a worst option — clustered at the top on purpose, because a uniform
+spread makes nearly every wrong answer a blunder, which teaches nothing. The "best" answer
+is whatever genuinely graded best on those boards, not an assumption about which one the
+solver picked.
+
+**Close counts.** Anything within 0.15 pts/hand of the top option is scored correct — two
+splits that close are a coin flip over 120 boards anyway (well inside the standard error),
+so demanding the exact argmax would just be grading Monte Carlo noise. Everything else is
+graded by how much EV it cost you, chess-style:
+
+| | EV lost per hand |
+|---|---|
+| **Best** (`!`) | ≤ 0.15 |
+| **Inaccuracy** (`?!`) | 0.15 – 0.75 |
+| **Mistake** (`?`) | 0.75 – 2.0 |
+| **Blunder** (`??`) | > 2.0 |
+
+The header tracks a **running average EV loss per hand** — the single number worth watching,
+since it's the rate you'd actually bleed chips at — plus how often you found the best split,
+your current streak, and a count of each tier. After answering, every option reveals its EV
+and what it would have cost, with the best one highlighted.
+
+Misses collect in a **Mistakes tab**, each showing the hand with what you picked next to
+what was best. **Retry this hand** replays that exact hand, the exact same boards and the
+same options (reshuffled, so you can't just remember the position), graded identically — so
+a retry is a real second attempt at the same problem rather than a fresh one. Retries
+deliberately do **not** move the session average, since otherwise you could grind it down by
+redrilling hands you've already memorized; they just mark the mistake fixed.
 
 ## Deploying so friends can join over the internet
 
@@ -153,6 +200,7 @@ public/index.html        App shell (landing / lobby / arranging / results / prac
 public/style.css         Styling
 public/client.js         Client logic: fetch() for actions, EventSource for live updates,
                          plus Practice Mode's client-side EV engine
-public/opponent-pool.json Pre-solved (hand, split) pairs powering Practice Mode's opponent
+public/opponent-pool.json Pre-solved (hand, split) pairs powering Practice Mode + Rapid Fire
 tests/poker.test.js      Dependency-free sanity tests (run with `node tests/poker.test.js`)
+tests/rapid_fire_ui.test.js  Rapid Fire end-to-end UI test (real Chromium via playwright)
 ```

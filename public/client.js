@@ -98,9 +98,11 @@
   // ---------- win sounds ----------
   // Synthesized with the Web Audio API (a couple of short oscillator tones per cue)
   // instead of shipping audio files — zero extra assets to host, and it means "add a
-  // sound" doesn't turn into "find/license/host an mp3." Only fires in live PvP games
-  // (results reveal), not Practice Mode, since practice hands run one after another too
-  // quickly for a sound cue to feel good rather than annoying.
+  // sound" doesn't turn into "find/license/host an mp3." The win/homerun fanfares fire in
+  // live PvP games only (at the results reveal) — Practice Mode runs hands too quickly in
+  // succession for those to feel good rather than annoying. Rapid Fire has its own much
+  // shorter correct-answer blip (playCorrectSound), which is sized for hearing it many
+  // times a minute.
   const SOUND_PREF_KEY = 'taiwanese-poker-sound-enabled';
   let soundEnabled = true;
   try {
@@ -214,9 +216,12 @@
   }
 
   // ---------- landing ----------
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
+  // Scoped to [data-tab] on purpose: other screens reuse the .tab-btn look for their own
+  // in-screen tabs (Rapid Fire's Quiz/Mistakes), and those carry a different data attribute
+  // and manage their own active state.
+  document.querySelectorAll('.tab-btn[data-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll('.tab-btn[data-tab]').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       document.querySelectorAll('.tab-content').forEach((c) => c.classList.add('hidden'));
       el('tab-' + btn.dataset.tab).classList.remove('hidden');
@@ -1630,6 +1635,490 @@
   // fires.
   wireSortControl('gameSortControl', renderGame);
   wireSortControl('practiceSortControl', renderPracticeArranger);
+
+  // ---------- rapid fire (GTO quiz) ----------
+  // A fast drill on the one decision this game actually has: given 7 cards, which 1/2/4
+  // split is best? Each quiz hand is drawn from the same homerun-equilibrium opponent pool
+  // Practice Mode uses, so one of the options on screen is always the offline solver's own
+  // pick for that hand (see experiments/solve/). Every option is then graded live against
+  // the SAME fixed trial set for that hand, so the EV gaps shown are internally consistent
+  // and the "best" answer is whatever genuinely graded best on those boards rather than an
+  // assumption. Answer with the number keys for speed.
+  const RAPID_TRIALS = 120; // boards per quiz hand (fixed set, shared by all options)
+  const RAPID_CANDIDATE_POOL = 14; // partitions graded per hand, before trimming to options
+  const RAPID_OPTIONS = 5; // options actually shown
+  // "Close EV is fine": anything within this of the best option counts as a correct answer.
+  // Two splits inside ~0.15 pts/hand are a coin flip at 120 boards anyway (that's well
+  // inside the standard error), so insisting on the exact argmax would be grading noise.
+  const RAPID_TOLERANCE = 0.15;
+  const RAPID_TIERS = [
+    { key: 'inaccuracy', label: 'Inaccuracy', mark: '?!', max: 0.75 },
+    { key: 'mistake', label: 'Mistake', mark: '?', max: 2.0 },
+    { key: 'blunder', label: 'Blunder', mark: '??', max: Infinity }
+  ];
+
+  let rapid = null;
+
+  function rapidNewState() {
+    return {
+      current: null, // active quiz
+      next: null, // preloaded next quiz
+      played: 0,
+      totalLoss: 0,
+      streak: 0,
+      bestStreak: 0,
+      counts: { best: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
+      mistakes: [],
+      mistakeSeq: 0,
+      view: 'quiz',
+      retry: null, // { mistake, quiz } when drilling a stored mistake
+      loading: false
+    };
+  }
+
+  function randomPartitionOf(hand) {
+    const s = shuffleArray(hand);
+    return { one: [s[0]], two: [s[1], s[2]], four: [s[3], s[4], s[5], s[6]] };
+  }
+
+  // Yield to the browser so a few hundred thousand hand evaluations don't freeze the tab.
+  function nextTick() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  async function gradeCandidates(candidates, trials) {
+    const graded = [];
+    for (const assignment of candidates) {
+      const result = evalAssignmentAcrossTrials(assignment, trials, practiceHomerunMode);
+      graded.push({ assignment, ev: result.avgTotal, homerunWins: result.homerunWins, homerunLosses: result.homerunLosses });
+      await nextTick();
+    }
+    graded.sort((a, b) => b.ev - a.ev);
+    return graded;
+  }
+
+  // From the graded list (sorted best first), take the top three, one mid-pack option and
+  // the worst. The clustering at the top is deliberate: a uniform spread across all 14
+  // candidates makes almost every wrong answer a blunder, which trains nothing. Three
+  // near-best options means telling them apart requires actually reading the hand (and is
+  // where the "close EV counts" tolerance earns its keep), while the mid and worst options
+  // keep the mistake and blunder tiers reachable.
+  function pickOptionSpread(graded) {
+    const n = graded.length;
+    const want = Math.min(RAPID_OPTIONS, n);
+    const targets = [0, 1, 2, Math.floor(n / 2), n - 1];
+    const picked = [];
+    for (const t of targets) {
+      if (picked.length >= want) break;
+      const clamp = Math.min(Math.max(t, 0), n - 1);
+      let i = clamp;
+      while (i < n && picked.includes(i)) i++;
+      if (i >= n) { i = clamp; while (i >= 0 && picked.includes(i)) i--; }
+      if (i >= 0 && i < n) picked.push(i);
+    }
+    return picked.map((i) => graded[i]);
+  }
+
+  async function buildRapidQuiz() {
+    const pool = await loadOpponentPool();
+    const seed = pool[Math.floor(Math.random() * pool.length)];
+    const hand = [...seed.one, ...seed.two, ...seed.four];
+    const trials = buildPracticeTrials(hand, pool, RAPID_TRIALS);
+
+    // Candidate set: the solver's own split for this hand, plus random partitions.
+    const candidates = [{ one: [...seed.one], two: [...seed.two], four: [...seed.four] }];
+    const seen = new Set([fmtAssignmentKey(candidates[0])]);
+    let guard = 0;
+    while (candidates.length < RAPID_CANDIDATE_POOL && guard < 400) {
+      guard++;
+      const cand = randomPartitionOf(hand);
+      const key = fmtAssignmentKey(cand);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(cand);
+    }
+
+    const graded = await gradeCandidates(candidates, trials);
+    const options = shuffleArray(pickOptionSpread(graded));
+    let bestIdx = 0;
+    options.forEach((o, i) => { if (o.ev > options[bestIdx].ev) bestIdx = i; });
+
+    return {
+      hand,
+      trials,
+      options,
+      bestIdx,
+      bestEv: options[bestIdx].ev,
+      solverKey: fmtAssignmentKey(candidates[0]),
+      answered: false,
+      chosenIdx: null
+    };
+  }
+
+  function classifyLoss(loss) {
+    if (loss <= RAPID_TOLERANCE) return { key: 'best', label: 'Best', mark: '!' };
+    return RAPID_TIERS.find((t) => loss <= t.max);
+  }
+
+  // A short rising two-note blip for a correct pick — deliberately much shorter than the
+  // live game's win chime, since in rapid fire you hear it many times a minute.
+  function playCorrectSound() {
+    if (!soundEnabled) return;
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    playTone(ctx, 880, now, 0.1, 0.14); // A5
+    playTone(ctx, 1318.51, now + 0.075, 0.14, 0.13); // E6
+  }
+
+  function rapidActiveQuiz() {
+    return rapid && (rapid.retry ? rapid.retry.quiz : rapid.current);
+  }
+
+  function renderRapidStats() {
+    const avgLoss = rapid.played ? rapid.totalLoss / rapid.played : 0;
+    const acc = rapid.played ? (rapid.counts.best / rapid.played) * 100 : 0;
+    el('rapidStats').innerHTML = `
+      <div class="rapid-stat headline">
+        <span class="rs-label">Avg EV lost / hand</span>
+        <span class="rs-value ${avgLoss <= 0.25 ? 'good' : avgLoss <= 0.9 ? 'mid' : 'bad'}">${avgLoss.toFixed(3)}</span>
+      </div>
+      <div class="rapid-stat">
+        <span class="rs-label">Hands</span>
+        <span class="rs-value">${rapid.played}</span>
+      </div>
+      <div class="rapid-stat">
+        <span class="rs-label">Best found</span>
+        <span class="rs-value">${rapid.counts.best}${rapid.played ? ` <span class="rs-sub">(${acc.toFixed(0)}%)</span>` : ''}</span>
+      </div>
+      <div class="rapid-stat">
+        <span class="rs-label">Streak</span>
+        <span class="rs-value">${rapid.streak}${rapid.bestStreak ? ` <span class="rs-sub">(best ${rapid.bestStreak})</span>` : ''}</span>
+      </div>
+      <div class="rapid-stat tiers">
+        <span class="tier-chip inaccuracy">?! ${rapid.counts.inaccuracy}</span>
+        <span class="tier-chip mistake">? ${rapid.counts.mistake}</span>
+        <span class="tier-chip blunder">?? ${rapid.counts.blunder}</span>
+      </div>`;
+    el('rapidMistakeCount').textContent = rapid.mistakes.filter((m) => !m.resolved).length;
+  }
+
+  function optionCardsNode(assignment) {
+    const wrap = document.createElement('div');
+    wrap.className = 'rapid-opt-cards';
+    const labels = { one: '1', two: '2', four: '4' };
+    ['one', 'two', 'four'].forEach((cat) => {
+      const group = document.createElement('span');
+      group.className = 'rapid-opt-group';
+      const lbl = document.createElement('span');
+      lbl.className = 'hc-label';
+      lbl.textContent = labels[cat] + ':';
+      group.appendChild(lbl);
+      group.appendChild(cardRow(assignment[cat], { size: 'small' }));
+      wrap.appendChild(group);
+    });
+    return wrap;
+  }
+
+  function renderRapidQuiz() {
+    const quiz = rapidActiveQuiz();
+    const isRetry = !!(rapid && rapid.retry);
+
+    el('rapidRetryBanner').classList.toggle('hidden', !isRetry);
+    if (isRetry) {
+      const m = rapid.retry.mistake;
+      el('rapidRetryBanner').innerHTML = `↻ Retrying a stored ${m.tier.label.toLowerCase()} — same hand, same boards. Retries don't count toward your session average.`;
+    }
+
+    if (!quiz) {
+      el('rapidHandRow').innerHTML = '<div class="hint">Dealing…</div>';
+      el('rapidOptions').innerHTML = '';
+      return;
+    }
+
+    const handRow = el('rapidHandRow');
+    handRow.innerHTML = '';
+    const lbl = document.createElement('span');
+    lbl.className = 'hc-label';
+    lbl.textContent = 'Your 7 cards:';
+    handRow.appendChild(lbl);
+    handRow.appendChild(cardRow(sortCards(quiz.hand, cardSortMode)));
+
+    el('rapidPrompt').textContent = quiz.answered
+      ? 'Review the EVs below, then continue.'
+      : `Which split has the highest EV? Press 1-${quiz.options.length} or click an option.`;
+
+    const list = el('rapidOptions');
+    list.innerHTML = '';
+    quiz.options.forEach((opt, i) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'rapid-option';
+      row.disabled = quiz.answered;
+
+      const num = document.createElement('span');
+      num.className = 'rapid-opt-num';
+      num.textContent = String(i + 1);
+      row.appendChild(num);
+      row.appendChild(optionCardsNode(opt.assignment));
+
+      const meta = document.createElement('span');
+      meta.className = 'rapid-opt-meta';
+      if (quiz.answered) {
+        const loss = quiz.bestEv - opt.ev;
+        const evSpan = document.createElement('span');
+        evSpan.className = 'rapid-opt-ev';
+        evSpan.textContent = `${fmtEv(opt.ev)} EV`;
+        meta.appendChild(evSpan);
+        if (loss > RAPID_TOLERANCE) {
+          const lossSpan = document.createElement('span');
+          lossSpan.className = 'rapid-opt-loss';
+          lossSpan.textContent = `−${loss.toFixed(2)}`;
+          meta.appendChild(lossSpan);
+        }
+        if (i === quiz.bestIdx) row.classList.add('is-best');
+        else if (loss <= RAPID_TOLERANCE) row.classList.add('is-close');
+        if (i === quiz.chosenIdx) row.classList.add('is-chosen');
+      }
+      row.appendChild(meta);
+
+      if (!quiz.answered) row.addEventListener('click', () => rapidAnswer(i));
+      list.appendChild(row);
+    });
+
+    el('btnRapidNext').classList.toggle('hidden', !quiz.answered);
+    el('btnRapidNext').textContent = isRetry ? 'Back to Mistakes' : 'Next Hand (Enter)';
+  }
+
+  function rapidAnswer(idx) {
+    const quiz = rapidActiveQuiz();
+    if (!quiz || quiz.answered) return;
+    const isRetry = !!rapid.retry;
+    quiz.answered = true;
+    quiz.chosenIdx = idx;
+
+    const loss = Math.max(0, quiz.bestEv - quiz.options[idx].ev);
+    const tier = classifyLoss(loss);
+    const correct = tier.key === 'best';
+
+    if (isRetry) {
+      const m = rapid.retry.mistake;
+      m.attempts = (m.attempts || 0) + 1;
+      if (correct) m.resolved = true;
+      m.lastRetryLoss = loss;
+    } else {
+      rapid.played++;
+      rapid.totalLoss += loss;
+      rapid.counts[tier.key]++;
+      if (correct) {
+        rapid.streak++;
+        if (rapid.streak > rapid.bestStreak) rapid.bestStreak = rapid.streak;
+      } else {
+        rapid.streak = 0;
+        rapid.mistakeSeq++;
+        rapid.mistakes.push({
+          id: rapid.mistakeSeq,
+          hand: quiz.hand,
+          trials: quiz.trials,
+          options: quiz.options,
+          bestIdx: quiz.bestIdx,
+          bestEv: quiz.bestEv,
+          chosenIdx: idx,
+          loss,
+          tier,
+          attempts: 0,
+          resolved: false
+        });
+      }
+    }
+
+    if (correct) playCorrectSound();
+
+    const fb = el('rapidFeedback');
+    fb.className = 'rapid-feedback tier-' + tier.key;
+    fb.innerHTML = correct
+      ? `<strong>${tier.mark} ${isRetry ? 'Fixed — best split' : 'Best split'}</strong> <span class="fb-sub">${loss > 0.0005 ? `within ${loss.toFixed(3)} of the top option — close enough to count` : 'exactly the top option'}</span>`
+      : `<strong>${tier.mark} ${tier.label}</strong> <span class="fb-sub">cost you ${loss.toFixed(2)} pts/hand vs. the best option (highlighted in green)</span>`;
+    fb.classList.remove('hidden');
+
+    renderRapidStats();
+    renderRapidQuiz();
+    renderRapidMistakes();
+
+    // Rapid fire: a correct answer moves on by itself. A miss waits, so you can actually
+    // look at what the better split was before the next hand replaces it.
+    if (correct && !isRetry) setTimeout(() => { if (rapid && rapid.view === 'quiz' && !rapid.retry) rapidNext(); }, 900);
+  }
+
+  async function rapidNext() {
+    if (!rapid) return;
+    if (rapid.retry) { // finishing a retry returns to the mistake list
+      rapid.retry = null;
+      setRapidView('mistakes');
+      return;
+    }
+    el('rapidFeedback').classList.add('hidden');
+    if (rapid.next) {
+      rapid.current = rapid.next;
+      rapid.next = null;
+      renderRapidQuiz();
+      preloadRapidNext();
+      return;
+    }
+    if (rapid.loading) return;
+    rapid.loading = true;
+    rapid.current = null;
+    renderRapidQuiz();
+    rapid.current = await buildRapidQuiz();
+    rapid.loading = false;
+    renderRapidQuiz();
+    preloadRapidNext();
+  }
+
+  // Grade the following hand while the player is still looking at this one, so there's no
+  // pause between hands once the drill is going.
+  async function preloadRapidNext() {
+    if (!rapid || rapid.next || rapid.loading) return;
+    const quiz = await buildRapidQuiz();
+    if (rapid) rapid.next = quiz;
+  }
+
+  function renderRapidMistakes() {
+    const list = el('rapidMistakeList');
+    list.innerHTML = '';
+    if (!rapid.mistakes.length) {
+      show('rapidMistakeEmpty');
+      return;
+    }
+    hide('rapidMistakeEmpty');
+    [...rapid.mistakes].reverse().forEach((m) => {
+      const item = document.createElement('div');
+      item.className = 'rapid-mistake' + (m.resolved ? ' resolved' : '');
+
+      const head = document.createElement('div');
+      head.className = 'rm-head';
+      head.innerHTML = `
+        <span class="tier-chip ${m.tier.key}">${m.tier.mark} ${m.tier.label}</span>
+        <span class="rm-loss">−${m.loss.toFixed(2)} pts/hand</span>
+        ${m.resolved ? '<span class="rm-fixed">✓ fixed on retry</span>' : m.attempts ? `<span class="rm-tries">${m.attempts} attempt${m.attempts === 1 ? '' : 's'}</span>` : ''}`;
+      item.appendChild(head);
+
+      const handWrap = document.createElement('div');
+      handWrap.className = 'rm-hand';
+      const hl = document.createElement('span');
+      hl.className = 'hc-label';
+      hl.textContent = 'Hand:';
+      handWrap.appendChild(hl);
+      handWrap.appendChild(cardRow(sortCards(m.hand, cardSortMode), { size: 'small' }));
+      item.appendChild(handWrap);
+
+      const cmp = document.createElement('div');
+      cmp.className = 'rm-compare';
+      [['You picked', m.options[m.chosenIdx], 'bad'], ['Best was', m.options[m.bestIdx], 'good']].forEach(([label, opt, cls]) => {
+        const line = document.createElement('div');
+        line.className = 'rm-line ' + cls;
+        const lab = document.createElement('span');
+        lab.className = 'hc-label';
+        lab.textContent = label + ':';
+        line.appendChild(lab);
+        line.appendChild(optionCardsNode(opt.assignment));
+        const ev = document.createElement('span');
+        ev.className = 'rapid-opt-ev';
+        ev.textContent = `${fmtEv(opt.ev)} EV`;
+        line.appendChild(ev);
+        cmp.appendChild(line);
+      });
+      item.appendChild(cmp);
+
+      const actions = document.createElement('div');
+      actions.className = 'rm-actions';
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'secondary';
+      retryBtn.textContent = m.resolved ? 'Retry again' : 'Retry this hand';
+      retryBtn.addEventListener('click', () => startRapidRetry(m.id));
+      actions.appendChild(retryBtn);
+      const dropBtn = document.createElement('button');
+      dropBtn.className = 'secondary';
+      dropBtn.textContent = 'Remove';
+      dropBtn.addEventListener('click', () => {
+        rapid.mistakes = rapid.mistakes.filter((x) => x.id !== m.id);
+        renderRapidStats();
+        renderRapidMistakes();
+      });
+      actions.appendChild(dropBtn);
+      item.appendChild(actions);
+
+      list.appendChild(item);
+    });
+  }
+
+  // Re-ask a stored mistake on the exact same hand, boards and options (order reshuffled so
+  // you can't just remember "it was the third one"), graded identically.
+  function startRapidRetry(mistakeId) {
+    const m = rapid.mistakes.find((x) => x.id === mistakeId);
+    if (!m) return;
+    const options = shuffleArray(m.options.map((o) => ({ ...o })));
+    let bestIdx = 0;
+    options.forEach((o, i) => { if (o.ev > options[bestIdx].ev) bestIdx = i; });
+    rapid.retry = {
+      mistake: m,
+      quiz: { hand: m.hand, trials: m.trials, options, bestIdx, bestEv: options[bestIdx].ev, answered: false, chosenIdx: null }
+    };
+    el('rapidFeedback').classList.add('hidden');
+    setRapidView('quiz');
+  }
+
+  function setRapidView(view) {
+    rapid.view = view;
+    el('rapid-tab-quiz').classList.toggle('hidden', view !== 'quiz');
+    el('rapid-tab-mistakes').classList.toggle('hidden', view !== 'mistakes');
+    document.querySelectorAll('#rapidTabs .tab-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.rapidTab === view);
+    });
+    if (view === 'quiz') renderRapidQuiz(); else renderRapidMistakes();
+  }
+
+  async function startRapidFire() {
+    hide('screen-landing');
+    show('screen-rapid');
+    rapid = rapidNewState();
+    renderRapidStats();
+    renderRapidMistakes();
+    el('rapidFeedback').classList.add('hidden');
+    setRapidView('quiz');
+    el('rapidHandRow').innerHTML = '<div class="hint">Loading opponent pool…</div>';
+    rapid.current = await buildRapidQuiz();
+    renderRapidQuiz();
+    preloadRapidNext();
+  }
+
+  el('btnRapidStart').addEventListener('click', () => { startRapidFire(); });
+  el('btnRapidNext').addEventListener('click', () => rapidNext());
+  el('btnRapidBack').addEventListener('click', () => {
+    rapid = null;
+    hide('screen-rapid');
+    show('screen-landing');
+  });
+  document.querySelectorAll('#rapidTabs .tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setRapidView(btn.dataset.rapidTab));
+  });
+  wireSortControl('rapidSortControl', () => { if (rapid) renderRapidQuiz(); });
+
+  document.addEventListener('keydown', (ev) => {
+    if (!rapid || el('screen-rapid').classList.contains('hidden')) return;
+    if (ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName)) return;
+    const quiz = rapidActiveQuiz();
+    if (!quiz) return;
+    if (!quiz.answered && /^[1-9]$/.test(ev.key)) {
+      const idx = Number(ev.key) - 1;
+      if (idx < quiz.options.length) { ev.preventDefault(); rapidAnswer(idx); }
+      return;
+    }
+    if (quiz.answered && (ev.key === 'Enter' || ev.key === ' ')) {
+      ev.preventDefault();
+      rapidNext();
+    }
+  });
 
   // ---------- boot / rejoin ----------
   const params = new URLSearchParams(location.search);

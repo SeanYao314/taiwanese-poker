@@ -28,6 +28,7 @@
         <button class="tab-btn active" data-tab="create">Create Room</button>
         <button class="tab-btn" data-tab="join">Join Room</button>
         <button class="tab-btn" data-tab="practice">Practice</button>
+        <button class="tab-btn" data-tab="rapid">Rapid Fire</button>
       </div>
 
       <div id="tab-create" class="tab-content">
@@ -64,6 +65,20 @@
           EV, tweak it, and compare. Homerun scoring is always included.
         </p>
         <button id="btnPracticeStart" class="primary">Start Practice</button>
+      </div>
+
+      <div id="tab-rapid" class="tab-content hidden">
+        <p class="hint" style="margin-top:0;">
+          Rapid-fire drill on the only real decision in this game: you get a hand and five
+          candidate splits, and you pick the one with the highest EV. Every option is graded
+          live against the same 120 board runouts, against the same homerun-solved opponents
+          Practice Mode uses &mdash; and one of the five is always the offline solver's own
+          pick for that hand. Close counts: anything within 0.15 pts/hand of the top option
+          is scored correct. Misses are graded as an <strong>inaccuracy</strong>,
+          <strong>mistake</strong>, or <strong>blunder</strong> by how much EV they cost, and
+          collected in a Mistakes tab you can drill again. Answer with the number keys.
+        </p>
+        <button id="btnRapidStart" class="primary">Start Rapid Fire</button>
       </div>
 
       <p id="landingError" class="error hidden"></p>
@@ -168,6 +183,57 @@
         <summary>Full comparison log</summary>
         <div id="comparisonLog"></div>
       </details>
+    </div>
+  </section>
+
+  <!-- RAPID FIRE (GTO quiz) -->
+  <section id="screen-rapid" class="screen hidden">
+    <div class="card-panel wide">
+      <div class="game-header">
+        <h2>Rapid Fire <span class="hint-inline">&mdash; pick the highest-EV split</span></h2>
+        <div class="actions" style="width:auto;">
+          <button id="btnRapidBack" class="secondary">Back to Menu</button>
+        </div>
+      </div>
+
+      <div id="rapidStats" class="rapid-stats"></div>
+
+      <div class="tabs rapid-tabs" id="rapidTabs">
+        <button class="tab-btn active" data-rapid-tab="quiz">Quiz</button>
+        <button class="tab-btn" data-rapid-tab="mistakes">Mistakes (<span id="rapidMistakeCount">0</span>)</button>
+      </div>
+
+      <div id="rapid-tab-quiz">
+        <p id="rapidRetryBanner" class="rapid-retry-banner hidden"></p>
+
+        <div class="tray-title-row" style="margin-bottom:8px;">
+          <div id="rapidHandRow" class="rapid-hand-row"></div>
+          <span class="sort-control" id="rapidSortControl">
+            <span class="sort-label">Sort:</span>
+            <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
+            <button type="button" class="sort-btn" data-sort="rank">Rank</button>
+            <button type="button" class="sort-btn" data-sort="suit">Suit</button>
+          </span>
+        </div>
+
+        <p id="rapidPrompt" class="hint"></p>
+        <div id="rapidOptions" class="rapid-options"></div>
+        <div id="rapidFeedback" class="rapid-feedback hidden"></div>
+        <div class="actions" style="margin-top:14px;">
+          <button id="btnRapidNext" class="primary hidden">Next Hand (Enter)</button>
+        </div>
+      </div>
+
+      <div id="rapid-tab-mistakes" class="hidden">
+        <p class="hint" style="margin-top:0;">
+          Every hand where you didn't find the best split, with what you picked next to what
+          was best. Retrying replays the identical hand, boards and options (reshuffled), so
+          the grade is directly comparable &mdash; retries don't count toward the session
+          average above.
+        </p>
+        <div id="rapidMistakeList" class="rapid-mistake-list"></div>
+        <p id="rapidMistakeEmpty" class="hint">No mistakes yet &mdash; anything short of the best split shows up here.</p>
+      </div>
     </div>
   </section>
 
