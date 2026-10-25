@@ -113,13 +113,33 @@ the answer is already waiting.
 
 ### Estimate EV
 
-You're shown a split and type what you think it's worth in points per hand. This is the one
-that builds a repeatable read: instead of pattern-matching shapes, you have to actually price
-a holding, and the reveal breaks the result down per hand and per board so you can see *which*
-hand your read was wrong about. Half the splits shown are the solver's own and half are
-randomly generated, because estimating only good splits teaches you the range of "fine" and
-nothing about the range of "bad". Alongside average error it tracks **bias** — whether you're
-systematically optimistic or pessimistic — which is usually the more fixable problem.
+You build a split exactly as in Arrange, then **price each hand separately**: what is the
+1-card hand worth per hand played, what is the 2-card hand worth, what is the PLO hand
+worth? This is the drill that builds a repeatable read, because it forces the question of
+*where* a split's points actually come from rather than just whether it feels right.
+
+The reveal grades each hand against its real EV and names your biggest miss, so you find out
+you're systematically overrating your PLO hand or underrating a lone ace. One wrinkle is
+made explicit rather than hidden: the homerun bonus can't be attributed to any single hand —
+it only exists when all six comparisons sweep — so it's reported on its own line, and the
+whole split's EV is your three hands *plus* that bonus. You're graded on how well the three
+estimates price the hand as a whole, with the average per-hand error tracked separately,
+since three estimates that are each wrong but cancel out is a different problem from being
+wrong about the total. It also tracks **bias** — whether you're systematically optimistic or
+pessimistic — which is usually more fixable than being noisy.
+
+### Live EV assist
+
+A **Show live EV** tick box prices each hand as you build it — the 1-card, 2-card and PLO
+hands plus the homerun bonus and total — updating on every card you place. A hand shows a
+dash until it's actually full, rather than a misleading partial number, and the homerun line
+only appears once the whole split exists. It works in every drill: in Arrange and Estimate
+it prices your split as you go, and in Locked NLH it prices all five completions up front.
+
+It's a training wheel, so hands played with it on are deliberately **not scored** and don't
+enter the mistakes list — the averages are only meaningful if they measure unaided
+judgement. Turn it on to calibrate, off to test yourself. Switching it on mid-hand marks that
+hand assisted, since you can't un-see the answer.
 
 ### Locked NLH
 
@@ -135,7 +155,7 @@ that close are a coin flip over this many boards (well inside the standard error
 demanding the exact argmax would just be grading Monte Carlo noise. Everything else is graded
 by the EV it cost, chess-style:
 
-| | Arrange / Locked NLH — EV lost | Estimate EV — error |
+| | Arrange / Locked NLH — EV lost | Estimate EV — total error |
 |---|---|---|
 | **Best** / **Sharp** (`!`) | ≤ 0.15 | ≤ 0.75 |
 | **Inaccuracy** / **Close** (`?!`) | 0.15 – 0.75 | 0.75 – 2.0 |

@@ -212,11 +212,15 @@
           <button type="button" class="rapid-mode-btn" data-rapid-mode="estimate">Estimate EV</button>
           <button type="button" class="rapid-mode-btn" data-rapid-mode="locked">Locked NLH</button>
         </div>
+        <label class="checkbox-label rapid-assist-toggle">
+          <input type="checkbox" id="rapidAssist" />
+          <span>Show live EV <span class="hint-inline">price each hand (1-card, 2-card, 4-card PLO) and the total as you build it &mdash; a practice aid, so hands played with it on aren't scored</span></span>
+        </label>
         <p id="rapidModeHint" class="hint"></p>
 
         <div id="rapidLoading" class="hint hidden">Dealing and solving&hellip;</div>
 
-        <!-- ARRANGE: build the split yourself -->
+        <!-- the arranger: shared by Arrange and Estimate -->
         <div id="rapidArrange" class="hidden">
           <div class="slots" id="rapidSlots">
             <div class="slot" data-rslot="one">
@@ -245,20 +249,37 @@
             </div>
             <div class="tray" id="rTray"></div>
           </div>
-
-          <div class="actions">
-            <button id="btnRapidClear" class="secondary">Clear</button>
-            <button id="btnRapidSubmit" class="primary" disabled>Submit (Enter)</button>
-          </div>
         </div>
 
-        <!-- ESTIMATE: read a split and price it -->
+        <div id="rapidLiveEv" class="rapid-live-ev hidden"></div>
+
+        <!-- Arrange mode's own actions -->
+        <div class="actions" id="rapidArrangeActions">
+          <button id="btnRapidClear" class="secondary">Clear</button>
+          <button id="btnRapidSubmit" class="primary" disabled>Submit (Enter)</button>
+        </div>
+
+        <!-- Estimate mode: price each hand you just built -->
         <div id="rapidEstimate" class="hidden">
-          <div id="rapidEstSplit" class="rapid-est-split"></div>
-          <div class="rapid-est-input-row">
-            <label for="rapidEstInput">EV estimate (pts/hand)</label>
-            <input id="rapidEstInput" type="number" step="0.1" placeholder="e.g. -1.5" />
-            <button id="btnRapidEstSubmit" class="primary">Submit (Enter)</button>
+          <p id="rapidEstGate" class="hint">Arrange all 7 cards above, then price each hand.</p>
+          <div id="rapidEstFields" class="rapid-est-fields hidden">
+            <div class="rapid-est-field">
+              <label for="rapidEstOne">1-Card Hand</label>
+              <input id="rapidEstOne" type="number" step="0.1" placeholder="e.g. -0.6" />
+            </div>
+            <div class="rapid-est-field">
+              <label for="rapidEstTwo">2-Card Hand</label>
+              <input id="rapidEstTwo" type="number" step="0.1" placeholder="e.g. -1.2" />
+            </div>
+            <div class="rapid-est-field">
+              <label for="rapidEstFour">4-Card PLO Hand</label>
+              <input id="rapidEstFour" type="number" step="0.1" placeholder="e.g. +1.5" />
+            </div>
+            <div class="rapid-est-field total">
+              <label>Your total</label>
+              <span id="rapidEstTotal" class="rapid-est-total">— (0/3 priced)</span>
+            </div>
+            <button id="btnRapidEstSubmit" class="primary" disabled>Submit (Enter)</button>
           </div>
           <div id="rapidEstReveal" class="rapid-est-reveal hidden"></div>
         </div>

@@ -1636,22 +1636,27 @@
   wireSortControl('gameSortControl', renderGame);
   wireSortControl('practiceSortControl', renderPracticeArranger);
 
-  // ---------- rapid fire (GTO drill) ----------
+  // ---------- rapid fire (GTO drills) ----------
   // Three drills on the one decision this game actually has, all scored against the same
   // homerun-solved opponents Practice Mode uses (full-match-sweep bonus included, since
   // that's always on):
   //   arrange  — you build the 1/2/4 split yourself, graded against the true best of all
   //              105 partitions of that hand.
-  //   estimate — you're shown a split and type what you think its EV is, to calibrate a
-  //              repeatable read of a hand rather than just recognizing shapes.
+  //   estimate — you build the split AND price it: one EV guess per hand (1-card, 2-card,
+  //              4-card PLO), so you practise reading where the points actually come from
+  //              rather than just recognizing good shapes.
   //   locked   — the 2-card NLH hand is fixed for you; you choose which of the remaining
   //              five cards plays alone, and the other four become the PLO hand.
   // Quiz hands are drawn from the solved pool itself, so the offline solver's own split for
   // the hand is always reachable — but "best" is always whatever genuinely graded best on
   // this hand's board set, never an assumption about what the solver picked.
+  //
+  // The "show live EV" assist (rapid.assist) is a training wheel: it prices each hand as
+  // you build it. Hands played with it on are deliberately NOT scored — the whole point of
+  // the averages is that they measure unaided judgement.
   const RAPID_TRIALS = 120; // arrange: boards per hand (105 partitions scored against these)
   const RAPID_LOCKED_TRIALS = 240; // locked: only 5 completions to score, so afford more boards
-  const RAPID_EST_TRIALS = 400; // estimate: a single split, so the target EV can be tighter
+  const RAPID_EST_TRIALS = 240; // estimate: only your own split to price, so afford more boards
   // "Close EV is fine": within this of the best split counts as correct. Two splits inside
   // ~0.15 pts/hand are a coin flip at this many boards (well inside the standard error), so
   // insisting on the exact argmax would be grading Monte Carlo noise.
@@ -1668,22 +1673,24 @@
     { key: 'mistake', label: 'Off', mark: '?', max: 4.0 },
     { key: 'blunder', label: 'Way off', mark: '??', max: Infinity }
   ];
+  const RAPID_CATS = ['one', 'two', 'four'];
   const RAPID_MODE_HINTS = {
     arrange: 'Build the highest-EV split you can. Click a card then a hand, press 1-7 to drop the next card into the first open slot, Backspace to undo. Graded against all 105 ways to split this hand.',
-    estimate: 'Read the split below and estimate its EV in points per hand. Negative is fine — most splits lose to a solved opponent. The breakdown on reveal shows which hand your read was wrong about.',
+    estimate: 'Build a split, then price each hand: what is the 1-card hand worth per hand played, and the 2-card, and the PLO hand? Negative is normal — most hands lose ground somewhere against a solved opponent.',
     locked: 'The 2-card NLH hand is locked. Pick which of the five remaining cards plays as the 1-card hand — the other four become the PLO hand. Press 1-5 or click.'
   };
 
   let rapid = null;
 
   function rapidNewModeStats() {
-    return { played: 0, totalLoss: 0, totalAbsErr: 0, totalSignedErr: 0, streak: 0, bestStreak: 0,
-      counts: { best: 0, inaccuracy: 0, mistake: 0, blunder: 0 } };
+    return { played: 0, totalLoss: 0, totalAbsErr: 0, totalSignedErr: 0, totalPerHandErr: 0,
+      streak: 0, bestStreak: 0, counts: { best: 0, inaccuracy: 0, mistake: 0, blunder: 0 } };
   }
 
   function rapidNewState() {
     return {
       mode: 'arrange',
+      assist: false,
       current: null,
       next: null,
       stats: { arrange: rapidNewModeStats(), estimate: rapidNewModeStats(), locked: rapidNewModeStats() },
@@ -1693,11 +1700,6 @@
       retry: null,
       loading: false
     };
-  }
-
-  function randomPartitionOf(hand) {
-    const s = shuffleArray(hand);
-    return { one: [s[0]], two: [s[1], s[2]], four: [s[3], s[4], s[5], s[6]] };
   }
 
   function nextTick() { return new Promise((resolve) => setTimeout(resolve, 0)); }
@@ -1769,24 +1771,82 @@
     });
   }
 
+  // The opponent's evaluations don't depend on how YOU split, so cache them once per hand.
+  // That's what makes pricing a single hand-group cheap enough to redo on every card
+  // placement for the live-EV assist.
+  function ensureOppCache(quiz) {
+    if (!quiz.oppCache) {
+      quiz.oppCache = quiz.trials.map((t) => ({
+        one: [evalHandOnBoard(t.oppSplit.one, t.boardA, 'one').score, evalHandOnBoard(t.oppSplit.one, t.boardB, 'one').score],
+        two: [evalHandOnBoard(t.oppSplit.two, t.boardA, 'two').score, evalHandOnBoard(t.oppSplit.two, t.boardB, 'two').score],
+        four: [evalHandOnBoard(t.oppSplit.four, t.boardA, 'four').score, evalHandOnBoard(t.oppSplit.four, t.boardB, 'four').score]
+      }));
+    }
+    return quiz.oppCache;
+  }
+
+  // Average points this one hand-group wins or loses per hand played, across both boards.
+  // Each category is compared only against the opponent's same category, so a group can be
+  // priced on its own without the rest of the split being decided.
+  function categoryEv(cards, cat, quiz) {
+    const cache = ensureOppCache(quiz);
+    const pts = PRACTICE_POINTS[cat];
+    let total = 0;
+    for (let i = 0; i < quiz.trials.length; i++) {
+      const t = quiz.trials[i];
+      const boards = [t.boardA, t.boardB];
+      for (let b = 0; b < 2; b++) {
+        const cmp = window.Poker.compareScores(evalHandOnBoard(cards, boards[b], cat).score, cache[i][cat][b]);
+        total += cmp > 0 ? pts : cmp < 0 ? -pts : 0;
+      }
+    }
+    return total / quiz.trials.length;
+  }
+
+  // Per-hand EV of a complete split, plus the homerun bonus broken out. The bonus can't be
+  // attributed to any single hand-group (it only exists when all six comparisons sweep), so
+  // it's reported on its own line rather than smeared across the three.
+  function splitEvBreakdown(result) {
+    const cats = {};
+    let subtotal = 0;
+    RAPID_CATS.forEach((cat) => {
+      cats[cat] = result.avgCells[cat][0] + result.avgCells[cat][1];
+      subtotal += cats[cat];
+    });
+    return { cats, subtotal, homerun: result.avgTotal - subtotal, total: result.avgTotal };
+  }
+
   function rapidSeedHand(pool) {
     const seed = pool[Math.floor(Math.random() * pool.length)];
     return { seed, hand: [...seed.one, ...seed.two, ...seed.four] };
+  }
+
+  function emptyArrangeFields() {
+    return { assignment: { one: [], two: [], four: [] }, selected: null, placeOrder: [] };
   }
 
   async function buildArrangeQuiz() {
     const pool = await loadOpponentPool();
     const { hand } = rapidSeedHand(pool);
     const trials = buildPracticeTrials(hand, pool, RAPID_TRIALS);
-    const quiz = {
-      mode: 'arrange', hand, trials, solved: null,
-      assignment: { one: [], two: [], four: [] }, selected: null, placeOrder: [],
-      answered: false
-    };
+    const quiz = Object.assign({ mode: 'arrange', hand, trials, solved: null, answered: false }, emptyArrangeFields());
     // Solve in the background while the player arranges — by the time anyone has placed
     // seven cards, the full 105-partition answer is already waiting.
     quiz.solvePromise = scorePartitionsAsync(allPartitions(hand), trials).then((s) => { quiz.solved = s; return s; });
     return quiz;
+  }
+
+  // Estimate mode deals a hand and nothing else: you choose the split AND price it, so
+  // there's no solve to precompute — the target is whatever your own split turns out to be
+  // worth, which is only known once you've built it.
+  async function buildEstimateQuiz() {
+    const pool = await loadOpponentPool();
+    const { hand } = rapidSeedHand(pool);
+    const trials = buildPracticeTrials(hand, pool, RAPID_EST_TRIALS);
+    return Object.assign({
+      mode: 'estimate', hand, trials, answered: false,
+      guesses: { one: null, two: null, four: null }, result: null, breakdown: null
+    }, emptyArrangeFields());
   }
 
   async function buildLockedQuiz() {
@@ -1798,26 +1858,6 @@
     const parts = rest.map((c) => ({ one: [c], two: lockedTwo, four: rest.filter((x) => x !== c) }));
     const quiz = { mode: 'locked', hand, trials, lockedTwo, rest, parts, solved: null, answered: false, chosenCard: null };
     quiz.solvePromise = scorePartitionsAsync(parts, trials).then((s) => { quiz.solved = s; return s; });
-    return quiz;
-  }
-
-  async function buildEstimateQuiz() {
-    const pool = await loadOpponentPool();
-    const { seed, hand } = rapidSeedHand(pool);
-    const trials = buildPracticeTrials(hand, pool, RAPID_EST_TRIALS);
-    // Half solver splits, half random ones: estimating only good splits would teach you the
-    // range of "fine" and nothing about the range of "bad".
-    const fromSolver = Math.random() < 0.5;
-    const split = fromSolver
-      ? { one: [...seed.one], two: [...seed.two], four: [...seed.four] }
-      : randomPartitionOf(hand);
-    const quiz = { mode: 'estimate', hand, trials, split, fromSolver, result: null, answered: false, guess: null };
-    quiz.solvePromise = (async () => {
-      await nextTick();
-      const r = evalAssignmentAcrossTrials(split, trials, practiceHomerunMode);
-      quiz.result = r;
-      return r;
-    })();
     return quiz;
   }
 
@@ -1848,15 +1888,14 @@
   function rapidActiveQuiz() {
     return rapid && (rapid.retry ? rapid.retry.quiz : rapid.current);
   }
-  function rapidModeStats() {
-    return rapid.stats[rapid.mode];
-  }
+  function rapidModeStats() { return rapid.stats[rapid.mode]; }
+  function rapidUsesArranger(quiz) { return quiz && (quiz.mode === 'arrange' || quiz.mode === 'estimate'); }
 
   function splitGroupsNode(assignment, opts = {}) {
     const wrap = document.createElement('div');
     wrap.className = 'rapid-split-groups';
     const labels = { one: '1', two: '2', four: '4' };
-    ['one', 'two', 'four'].forEach((cat) => {
+    RAPID_CATS.forEach((cat) => {
       const group = document.createElement('span');
       group.className = 'rapid-split-group';
       const lbl = document.createElement('span');
@@ -1872,13 +1911,25 @@
   function renderRapidStats() {
     const st = rapidModeStats();
     const isEst = rapid.mode === 'estimate';
-    const headlineVal = isEst
-      ? (st.played ? st.totalAbsErr / st.played : 0)
-      : (st.played ? st.totalLoss / st.played : 0);
-    const headlineLabel = isEst ? 'Avg estimate error' : 'Avg EV lost / hand';
+    const headlineVal = st.played ? (isEst ? st.totalAbsErr : st.totalLoss) / st.played : 0;
+    const headlineLabel = isEst ? 'Avg total EV error' : 'Avg EV lost / hand';
     const good = isEst ? 1.0 : 0.25;
     const mid = isEst ? 2.5 : 0.9;
     const bias = st.played ? st.totalSignedErr / st.played : 0;
+    const perHand = st.played ? st.totalPerHandErr / st.played : 0;
+    const extra = isEst
+      ? `<div class="rapid-stat">
+           <span class="rs-label">Per-hand err</span>
+           <span class="rs-value">${st.played ? perHand.toFixed(2) : '—'}</span>
+         </div>
+         <div class="rapid-stat">
+           <span class="rs-label">Bias</span>
+           <span class="rs-value">${st.played ? `${bias > 0 ? '+' : ''}${bias.toFixed(2)} <span class="rs-sub">${Math.abs(bias) < 0.3 ? '(calibrated)' : bias > 0 ? '(too high)' : '(too low)'}</span>` : '—'}</span>
+         </div>`
+      : `<div class="rapid-stat">
+           <span class="rs-label">Streak</span>
+           <span class="rs-value">${st.streak}${st.bestStreak ? ` <span class="rs-sub">(best ${st.bestStreak})</span>` : ''}</span>
+         </div>`;
     el('rapidStats').innerHTML = `
       <div class="rapid-stat headline">
         <span class="rs-label">${headlineLabel}</span>
@@ -1892,12 +1943,7 @@
         <span class="rs-label">${isEst ? 'Sharp' : 'Best found'}</span>
         <span class="rs-value">${st.counts.best}${st.played ? ` <span class="rs-sub">(${((st.counts.best / st.played) * 100).toFixed(0)}%)</span>` : ''}</span>
       </div>
-      <div class="rapid-stat">
-        <span class="rs-label">${isEst ? 'Bias' : 'Streak'}</span>
-        <span class="rs-value">${isEst
-          ? (st.played ? `${bias > 0 ? '+' : ''}${bias.toFixed(2)} <span class="rs-sub">${Math.abs(bias) < 0.3 ? '(calibrated)' : bias > 0 ? '(too high)' : '(too low)'}</span>` : '—')
-          : `${st.streak}${st.bestStreak ? ` <span class="rs-sub">(best ${st.bestStreak})</span>` : ''}`}</span>
-      </div>
+      ${extra}
       <div class="rapid-stat tiers">
         <span class="tier-chip inaccuracy">${isEst ? 'Close' : '?!'} ${st.counts.inaccuracy}</span>
         <span class="tier-chip mistake">${isEst ? 'Off' : '?'} ${st.counts.mistake}</span>
@@ -1906,7 +1952,7 @@
     el('rapidMistakeCount').textContent = rapid.mistakes.filter((m) => !m.resolved).length;
   }
 
-  // ---- arrange mode ----
+  // ---- the arranger (shared by arrange + estimate) ----
   function rapidTrayCards(quiz) {
     const used = new Set([...quiz.assignment.one, ...quiz.assignment.two, ...quiz.assignment.four]);
     return sortCards(quiz.hand.filter((c) => !used.has(c)), cardSortMode);
@@ -1920,7 +1966,7 @@
   }
 
   function rapidUnplace(quiz, card) {
-    for (const slot of ['one', 'two', 'four']) {
+    for (const slot of RAPID_CATS) {
       if (quiz.assignment[slot].includes(card)) {
         quiz.assignment[slot] = quiz.assignment[slot].filter((c) => c !== card);
         quiz.placeOrder = quiz.placeOrder.filter((p) => p.card !== card);
@@ -1929,13 +1975,20 @@
     }
   }
 
+  function rapidPlaceFirstOpen(quiz, card) {
+    for (const slot of RAPID_CATS) {
+      if (quiz.assignment[slot].length < CAPACITY[slot]) { rapidPlace(quiz, card, slot); return true; }
+    }
+    return false;
+  }
+
   function rapidArrangeComplete(quiz) {
     return quiz.assignment.one.length === 1 && quiz.assignment.two.length === 2 && quiz.assignment.four.length === 4;
   }
 
   function renderRapidArrange() {
     const quiz = rapidActiveQuiz();
-    ['one', 'two', 'four'].forEach((slot) => {
+    RAPID_CATS.forEach((slot) => {
       const container = el('rSlot' + capitalize(slot));
       container.innerHTML = '';
       quiz.assignment[slot].forEach((c) => {
@@ -1945,7 +1998,7 @@
             ev.stopPropagation();
             rapidUnplace(quiz, c);
             quiz.selected = null;
-            renderRapidArrange();
+            renderRapidDrill();
           });
         }
         container.appendChild(node);
@@ -1974,7 +2027,7 @@
           } else {
             quiz.selected = quiz.selected === c ? null : c;
           }
-          renderRapidArrange();
+          renderRapidDrill();
         });
         tray.appendChild(node);
       });
@@ -1984,7 +2037,7 @@
       slotDiv.onclick = () => {
         if (quiz.answered || !quiz.selected) return;
         if (rapidPlace(quiz, quiz.selected, slotDiv.dataset.rslot)) quiz.selected = null;
-        renderRapidArrange();
+        renderRapidDrill();
       };
     });
 
@@ -1992,11 +2045,99 @@
     el('btnRapidClear').disabled = quiz.answered;
   }
 
-  function rapidPlaceFirstOpen(quiz, card) {
-    for (const slot of ['one', 'two', 'four']) {
-      if (quiz.assignment[slot].length < CAPACITY[slot]) { rapidPlace(quiz, card, slot); return true; }
+  // ---- live EV assist ----
+  // Prices each hand-group that's currently complete. Incomplete groups show a dash rather
+  // than a misleading partial number. Once all three are placed it switches to the full
+  // evaluation, which is also the only point at which the homerun bonus can exist.
+  function renderRapidLiveEv() {
+    const quiz = rapidActiveQuiz();
+    const panel = el('rapidLiveEv');
+    if (!rapid.assist || !rapidUsesArranger(quiz) || quiz.answered) {
+      panel.classList.add('hidden');
+      return;
     }
-    return false;
+    const complete = rapidArrangeComplete(quiz);
+    let cats = {};
+    let homerun = null;
+    let total = null;
+    if (complete) {
+      const b = splitEvBreakdown(evalAssignmentAcrossTrials(quiz.assignment, quiz.trials, practiceHomerunMode));
+      cats = b.cats; homerun = b.homerun; total = b.total;
+    } else {
+      RAPID_CATS.forEach((cat) => {
+        cats[cat] = quiz.assignment[cat].length === CAPACITY[cat] ? categoryEv(quiz.assignment[cat], cat, quiz) : null;
+      });
+    }
+    const cell = (v) => v === null
+      ? '<span class="rle-val none">—</span>'
+      : `<span class="rle-val ${v > 0 ? 'pos' : v < 0 ? 'neg' : 'even'}">${fmtEv(v)}</span>`;
+    panel.innerHTML = `
+      <span class="rle-title">Live EV</span>
+      <span class="rle-item"><span class="rle-label">1-card</span>${cell(cats.one)}</span>
+      <span class="rle-item"><span class="rle-label">2-card</span>${cell(cats.two)}</span>
+      <span class="rle-item"><span class="rle-label">4-card PLO</span>${cell(cats.four)}</span>
+      <span class="rle-item"><span class="rle-label">Homerun</span>${cell(homerun)}</span>
+      <span class="rle-item total"><span class="rle-label">Total</span>${cell(total)}</span>
+      <span class="rle-note">${complete ? 'assisted — this hand is not scored' : 'each hand prices itself once it is full'}</span>`;
+    panel.classList.remove('hidden');
+  }
+
+  // ---- estimate mode ----
+  function renderRapidEstimate() {
+    const quiz = rapidActiveQuiz();
+    const complete = rapidArrangeComplete(quiz);
+    el('rapidEstGate').classList.toggle('hidden', complete);
+    el('rapidEstFields').classList.toggle('hidden', !complete);
+
+    RAPID_CATS.forEach((cat) => {
+      const input = el('rapidEst' + capitalize(cat));
+      input.disabled = quiz.answered || !complete;
+      if (!quiz.answered && !complete) input.value = '';
+    });
+    el('btnRapidEstSubmit').disabled = quiz.answered || !complete;
+    renderRapidEstTotal();
+    if (!quiz.answered) el('rapidEstReveal').classList.add('hidden');
+  }
+
+  function rapidEstGuesses() {
+    const out = {};
+    RAPID_CATS.forEach((cat) => {
+      const raw = el('rapidEst' + capitalize(cat)).value.trim();
+      out[cat] = raw === '' || isNaN(Number(raw)) ? null : Number(raw);
+    });
+    return out;
+  }
+
+  function renderRapidEstTotal() {
+    const g = rapidEstGuesses();
+    const filled = RAPID_CATS.filter((c) => g[c] !== null);
+    el('rapidEstTotal').textContent = filled.length === 3
+      ? fmtEv(g.one + g.two + g.four)
+      : `— (${filled.length}/3 priced)`;
+  }
+
+  function renderRapidEstimateReveal() {
+    const quiz = rapidActiveQuiz();
+    const b = quiz.breakdown;
+    const labels = { one: '1-Card Hand', two: '2-Card Hand', four: '4-Card PLO Hand' };
+    const rows = RAPID_CATS.map((cat) => {
+      const err = quiz.guesses[cat] - b.cats[cat];
+      return `<div class="rer-row">
+        <span class="rer-label">${labels[cat]}</span>
+        <span class="rer-guess">you said ${fmtEv(quiz.guesses[cat])}</span>
+        <span class="rer-actual ${b.cats[cat] > 0 ? 'pos' : b.cats[cat] < 0 ? 'neg' : 'even'}">actually ${fmtEv(b.cats[cat])}</span>
+        <span class="rer-err ${Math.abs(err) <= RAPID_EST_TOLERANCE ? 'ok' : ''}">${err > 0 ? 'over' : 'under'} by ${Math.abs(err).toFixed(2)}</span>
+      </div>`;
+    }).join('');
+    const guessTotal = quiz.guesses.one + quiz.guesses.two + quiz.guesses.four;
+    el('rapidEstReveal').innerHTML = `
+      <div class="rer-rows">${rows}</div>
+      <div class="rer-summary">
+        <span>Your three hands: <strong>${fmtEv(guessTotal)}</strong> vs. actual <strong class="${b.subtotal > 0 ? 'pos' : 'neg'}">${fmtEv(b.subtotal)}</strong></span>
+        <span class="rer-hr">⚾ Homerun bonus (can't be attributed to one hand): <strong>${fmtEv(b.homerun)}</strong></span>
+        <span>Whole split is worth <strong class="${b.total > 0 ? 'pos' : 'neg'}">${fmtEv(b.total)}</strong> pts/hand</span>
+      </div>`;
+    el('rapidEstReveal').classList.remove('hidden');
   }
 
   // ---- locked-NLH mode ----
@@ -2010,6 +2151,9 @@
     lockedWrap.appendChild(lbl);
     lockedWrap.appendChild(cardRow(quiz.lockedTwo));
 
+    // With the assist on, every completion is priced up front — that's the whole point of
+    // the training wheel, and it's why assisted hands aren't scored.
+    const reveal = quiz.answered || (rapid.assist && quiz.solved);
     const choices = el('rapidLockedChoices');
     choices.innerHTML = '';
     sortCards(quiz.rest, cardSortMode).forEach((card, i) => {
@@ -2023,27 +2167,20 @@
       num.textContent = String(i + 1);
       btn.appendChild(num);
 
-      const oneWrap = document.createElement('span');
-      oneWrap.className = 'rlc-part';
-      const oneLbl = document.createElement('span');
-      oneLbl.className = 'hc-label';
-      oneLbl.textContent = '1:';
-      oneWrap.appendChild(oneLbl);
-      oneWrap.appendChild(cardRow([card], { size: 'small' }));
-      btn.appendChild(oneWrap);
-
-      const ploWrap = document.createElement('span');
-      ploWrap.className = 'rlc-part';
-      const ploLbl = document.createElement('span');
-      ploLbl.className = 'hc-label';
-      ploLbl.textContent = '4:';
-      ploWrap.appendChild(ploLbl);
-      ploWrap.appendChild(cardRow(quiz.rest.filter((x) => x !== card), { size: 'small' }));
-      btn.appendChild(ploWrap);
+      [['1:', [card]], ['4:', quiz.rest.filter((x) => x !== card)]].forEach(([text, cards]) => {
+        const part = document.createElement('span');
+        part.className = 'rlc-part';
+        const l = document.createElement('span');
+        l.className = 'hc-label';
+        l.textContent = text;
+        part.appendChild(l);
+        part.appendChild(cardRow(cards, { size: 'small' }));
+        btn.appendChild(part);
+      });
 
       const meta = document.createElement('span');
       meta.className = 'rapid-opt-meta';
-      if (quiz.answered && quiz.solved) {
+      if (reveal) {
         const entry = quiz.solved.find((s) => s.assignment.one[0] === card);
         const loss = quiz.solved[0].ev - entry.ev;
         const ev = document.createElement('span');
@@ -2058,57 +2195,13 @@
         }
         if (entry.key === quiz.solved[0].key) btn.classList.add('is-best');
         else if (loss <= RAPID_TOLERANCE) btn.classList.add('is-close');
-        if (card === quiz.chosenCard) btn.classList.add('is-chosen');
+        if (quiz.answered && card === quiz.chosenCard) btn.classList.add('is-chosen');
       }
       btn.appendChild(meta);
 
       if (!quiz.answered) btn.addEventListener('click', () => rapidAnswerLocked(card));
       choices.appendChild(btn);
     });
-  }
-
-  // ---- estimate mode ----
-  function renderRapidEstimate() {
-    const quiz = rapidActiveQuiz();
-    const wrap = el('rapidEstSplit');
-    wrap.innerHTML = '';
-    const lbl = document.createElement('span');
-    lbl.className = 'hc-label';
-    lbl.textContent = 'Estimate the EV of this split:';
-    wrap.appendChild(lbl);
-    wrap.appendChild(splitGroupsNode(quiz.split, { size: 'normal' }));
-
-    el('rapidEstInput').disabled = quiz.answered;
-    el('btnRapidEstSubmit').disabled = quiz.answered;
-    if (!quiz.answered) {
-      el('rapidEstInput').value = '';
-      el('rapidEstReveal').classList.add('hidden');
-    }
-  }
-
-  function renderRapidEstimateReveal() {
-    const quiz = rapidActiveQuiz();
-    const r = quiz.result;
-    const reveal = el('rapidEstReveal');
-    const rows = ['one', 'two', 'four'].map((cat) => {
-      const a = r.avgCells[cat][0];
-      const b = r.avgCells[cat][1];
-      return `<div class="pcat-row">
-        <div class="pcat-label">${SLOT_TITLES[cat]}</div>
-        <div><span class="pcell-sub">Board A: </span><span class="pcell ${a > 0 ? 'pos' : a < 0 ? 'neg' : 'even'}">${fmtEv(a)}</span></div>
-        <div><span class="pcell-sub">Board B: </span><span class="pcell ${b > 0 ? 'pos' : b < 0 ? 'neg' : 'even'}">${fmtEv(b)}</span></div>
-      </div>`;
-    }).join('');
-    reveal.innerHTML = `
-      <div class="rapid-est-compare">
-        <span>Your estimate: <strong>${fmtEv(quiz.guess)}</strong></span>
-        <span>Actual: <strong class="pscore ${r.avgTotal > 0 ? 'pos' : r.avgTotal < 0 ? 'neg' : ''}">${fmtEv(r.avgTotal)}</strong></span>
-        <span class="rapid-est-err">off by ${Math.abs(r.avgTotal - quiz.guess).toFixed(2)}</span>
-      </div>
-      <div class="practice-ev-breakdown">${rows}</div>
-      <p class="practice-homerun-rate">⚾ This split swept ${r.homerunWins}/${r.n} boards · got swept ${r.homerunLosses}/${r.n}</p>
-      <p class="hint" style="margin-bottom:0;">${quiz.fromSolver ? "This was the solver's own split for this hand." : 'This was a randomly generated split, not the solver\'s.'}</p>`;
-    reveal.classList.remove('hidden');
   }
 
   // ---- shared rendering ----
@@ -2127,8 +2220,9 @@
       b.disabled = isRetry;
     });
     el('rapidModeHint').textContent = RAPID_MODE_HINTS[rapid.mode];
+    el('rapidAssist').checked = rapid.assist;
 
-    ['rapidArrange', 'rapidEstimate', 'rapidLocked'].forEach((id) => el(id).classList.add('hidden'));
+    ['rapidArrange', 'rapidArrangeActions', 'rapidEstimate', 'rapidLocked', 'rapidLiveEv'].forEach((id) => el(id).classList.add('hidden'));
     if (!quiz) {
       el('rapidLoading').classList.remove('hidden');
       el('btnRapidNext').classList.add('hidden');
@@ -2136,27 +2230,39 @@
     }
     el('rapidLoading').classList.add('hidden');
 
-    if (quiz.mode === 'arrange') { el('rapidArrange').classList.remove('hidden'); renderRapidArrange(); }
-    else if (quiz.mode === 'locked') { el('rapidLocked').classList.remove('hidden'); renderRapidLocked(); }
-    else { el('rapidEstimate').classList.remove('hidden'); renderRapidEstimate(); if (quiz.answered) renderRapidEstimateReveal(); }
+    if (rapidUsesArranger(quiz)) {
+      el('rapidArrange').classList.remove('hidden');
+      renderRapidArrange();
+      renderRapidLiveEv();
+      if (quiz.mode === 'arrange') el('rapidArrangeActions').classList.remove('hidden');
+      else { el('rapidEstimate').classList.remove('hidden'); renderRapidEstimate(); if (quiz.answered) renderRapidEstimateReveal(); }
+    } else {
+      el('rapidLocked').classList.remove('hidden');
+      renderRapidLocked();
+    }
 
     el('btnRapidNext').classList.toggle('hidden', !quiz.answered);
     el('btnRapidNext').textContent = isRetry ? 'Back to Mistakes' : 'Next Hand (Enter)';
   }
 
-  function rapidRecord(tier, loss, signedErr, quiz, extra) {
+  // Records a graded hand. `assisted` hands are deliberately left out of the averages --
+  // the stats are meant to measure unaided judgement, and the live-EV panel hands you the
+  // answer. They still get graded and shown, they just don't move the numbers.
+  function rapidRecord(tier, loss, signedErr, perHandErr, quiz, extra) {
     const isRetry = !!rapid.retry;
     const correct = tier.key === 'best';
+    const assisted = !!quiz.assisted;
     if (isRetry) {
       const m = rapid.retry.mistake;
       m.attempts = (m.attempts || 0) + 1;
       if (correct) m.resolved = true;
-    } else {
+    } else if (!assisted) {
       const st = rapidModeStats();
       st.played++;
       st.totalLoss += loss;
       st.totalAbsErr += Math.abs(signedErr === null ? loss : signedErr);
       if (signedErr !== null) st.totalSignedErr += signedErr;
+      if (perHandErr !== null) st.totalPerHandErr += perHandErr;
       st.counts[tier.key]++;
       if (correct) {
         st.streak++;
@@ -2175,16 +2281,21 @@
       }
     }
     if (correct) playCorrectSound();
-    return correct;
+    return { correct, assisted };
+  }
+
+  function rapidAssistNote(assisted) {
+    return assisted ? ' <span class="fb-assist">· assisted, not scored</span>' : '';
   }
 
   async function rapidSubmitArrange() {
     const quiz = rapidActiveQuiz();
     if (!quiz || quiz.answered || !rapidArrangeComplete(quiz)) return;
     if (!quiz.solved) {
-      el('rapidFeedback').className = 'rapid-feedback';
-      el('rapidFeedback').textContent = 'Grading all 105 splits…';
-      el('rapidFeedback').classList.remove('hidden');
+      const fb = el('rapidFeedback');
+      fb.className = 'rapid-feedback';
+      fb.textContent = 'Grading all 105 splits…';
+      fb.classList.remove('hidden');
       await quiz.solvePromise;
     }
     quiz.answered = true;
@@ -2194,7 +2305,7 @@
     const best = quiz.solved[0];
     const loss = Math.max(0, best.ev - mine.ev);
     const tier = classifyLoss(loss, 'arrange');
-    const correct = rapidRecord(tier, loss, null, quiz, {
+    const { correct, assisted } = rapidRecord(tier, loss, null, null, quiz, {
       userAssignment: deepCopy(quiz.assignment), bestAssignment: best.assignment,
       userEv: mine.ev, bestEv: best.ev, rank
     });
@@ -2202,7 +2313,7 @@
     const fb = el('rapidFeedback');
     fb.className = 'rapid-feedback tier-' + tier.key;
     fb.innerHTML = `<strong>${tier.mark} ${correct ? (rapid.retry ? 'Fixed' : 'Best split') : tier.label}</strong>
-      <span class="fb-sub">your split graded ${fmtEv(mine.ev)} EV · ranked #${rank + 1} of ${quiz.solved.length}${correct ? '' : ` · the best split was ${fmtEv(best.ev)}, costing you ${loss.toFixed(2)} pts/hand`}</span>`;
+      <span class="fb-sub">your split graded ${fmtEv(mine.ev)} EV · ranked #${rank + 1} of ${quiz.solved.length}${correct ? '' : ` · the best split was ${fmtEv(best.ev)}, costing you ${loss.toFixed(2)} pts/hand`}${rapidAssistNote(assisted)}</span>`;
     if (!correct) {
       const cmp = document.createElement('div');
       cmp.className = 'rapid-best-reveal';
@@ -2221,6 +2332,42 @@
     if (correct && !rapid.retry) setTimeout(() => { if (rapid && rapid.view === 'drill' && !rapid.retry) rapidNext(); }, 1100);
   }
 
+  async function rapidSubmitEstimate() {
+    const quiz = rapidActiveQuiz();
+    if (!quiz || quiz.answered || !rapidArrangeComplete(quiz)) return;
+    const guesses = rapidEstGuesses();
+    const missing = RAPID_CATS.find((c) => guesses[c] === null);
+    if (missing) { el('rapidEst' + capitalize(missing)).focus(); return; }
+
+    quiz.answered = true;
+    quiz.guesses = guesses;
+    quiz.result = evalAssignmentAcrossTrials(quiz.assignment, quiz.trials, practiceHomerunMode);
+    quiz.breakdown = splitEvBreakdown(quiz.result);
+
+    // Graded on how well the three estimates price the hand as a whole; the per-hand errors
+    // are reported separately, since estimates that are each wrong but cancel out is a
+    // different (and more forgivable) problem than being wrong about the total.
+    const guessTotal = guesses.one + guesses.two + guesses.four;
+    const signedErr = guessTotal - quiz.breakdown.subtotal; // positive = too optimistic
+    const absErr = Math.abs(signedErr);
+    const perHandErr = RAPID_CATS.reduce((s, c) => s + Math.abs(guesses[c] - quiz.breakdown.cats[c]), 0) / 3;
+    const tier = classifyLoss(absErr, 'estimate');
+    const { correct, assisted } = rapidRecord(tier, absErr, signedErr, perHandErr, quiz, null);
+
+    const worst = RAPID_CATS.reduce((a, c) =>
+      Math.abs(guesses[c] - quiz.breakdown.cats[c]) > Math.abs(guesses[a] - quiz.breakdown.cats[a]) ? c : a, 'one');
+    const worstLabel = { one: '1-card', two: '2-card', four: 'PLO' }[worst];
+    const fb = el('rapidFeedback');
+    fb.className = 'rapid-feedback tier-' + tier.key;
+    fb.innerHTML = `<strong>${tier.mark} ${tier.label}</strong>
+      <span class="fb-sub">your three hands totalled ${absErr.toFixed(2)} off (${signedErr > 0 ? 'too optimistic' : 'too pessimistic'}) · biggest miss was the ${worstLabel} hand${rapidAssistNote(assisted)}</span>`;
+    fb.classList.remove('hidden');
+
+    renderRapidStats();
+    renderRapidDrill();
+    if (correct && !rapid.retry) setTimeout(() => { if (rapid && rapid.view === 'drill' && !rapid.retry) rapidNext(); }, 1600);
+  }
+
   async function rapidAnswerLocked(card) {
     const quiz = rapidActiveQuiz();
     if (!quiz || quiz.answered) return;
@@ -2232,7 +2379,7 @@
     const rank = quiz.solved.findIndex((s) => s.key === mine.key);
     const loss = Math.max(0, best.ev - mine.ev);
     const tier = classifyLoss(loss, 'locked');
-    const correct = rapidRecord(tier, loss, null, quiz, {
+    const { correct, assisted } = rapidRecord(tier, loss, null, null, quiz, {
       userAssignment: mine.assignment, bestAssignment: best.assignment,
       userEv: mine.ev, bestEv: best.ev, rank, lockedTwo: quiz.lockedTwo, rest: quiz.rest, parts: quiz.parts
     });
@@ -2240,40 +2387,13 @@
     const fb = el('rapidFeedback');
     fb.className = 'rapid-feedback tier-' + tier.key;
     fb.innerHTML = `<strong>${tier.mark} ${correct ? (rapid.retry ? 'Fixed' : 'Best completion') : tier.label}</strong>
-      <span class="fb-sub">${fmtEv(mine.ev)} EV · ranked #${rank + 1} of ${quiz.solved.length} completions${correct ? '' : ` · best was ${fmtEv(best.ev)}, costing you ${loss.toFixed(2)} pts/hand`}</span>`;
+      <span class="fb-sub">${fmtEv(mine.ev)} EV · ranked #${rank + 1} of ${quiz.solved.length} completions${correct ? '' : ` · best was ${fmtEv(best.ev)}, costing you ${loss.toFixed(2)} pts/hand`}${rapidAssistNote(assisted)}</span>`;
     fb.classList.remove('hidden');
 
     renderRapidStats();
     renderRapidDrill();
     renderRapidMistakes();
     if (correct && !rapid.retry) setTimeout(() => { if (rapid && rapid.view === 'drill' && !rapid.retry) rapidNext(); }, 1100);
-  }
-
-  async function rapidSubmitEstimate() {
-    const quiz = rapidActiveQuiz();
-    if (!quiz || quiz.answered) return;
-    const raw = el('rapidEstInput').value.trim();
-    if (raw === '' || isNaN(Number(raw))) {
-      el('rapidEstInput').focus();
-      return;
-    }
-    if (!quiz.result) await quiz.solvePromise;
-    quiz.answered = true;
-    quiz.guess = Number(raw);
-    const signedErr = quiz.guess - quiz.result.avgTotal; // positive = you were too optimistic
-    const absErr = Math.abs(signedErr);
-    const tier = classifyLoss(absErr, 'estimate');
-    const correct = rapidRecord(tier, absErr, signedErr, quiz, null);
-
-    const fb = el('rapidFeedback');
-    fb.className = 'rapid-feedback tier-' + tier.key;
-    fb.innerHTML = `<strong>${tier.mark} ${tier.label}</strong>
-      <span class="fb-sub">off by ${absErr.toFixed(2)} pts/hand — you read it ${signedErr > 0 ? 'better' : 'worse'} than it actually is</span>`;
-    fb.classList.remove('hidden');
-
-    renderRapidStats();
-    renderRapidDrill();
-    if (correct && !rapid.retry) setTimeout(() => { if (rapid && rapid.view === 'drill' && !rapid.retry) rapidNext(); }, 1400);
   }
 
   function rapidSubmit() {
@@ -2294,6 +2414,7 @@
     if (rapid.next) {
       rapid.current = rapid.next;
       rapid.next = null;
+      rapid.current.assisted = rapid.assist;
       renderRapidDrill();
       preloadRapidNext();
       return;
@@ -2306,6 +2427,7 @@
     const quiz = await buildQuizForMode(mode);
     rapid.loading = false;
     if (!rapid || rapid.mode !== mode) return; // mode switched while building
+    quiz.assisted = rapid.assist;
     rapid.current = quiz;
     renderRapidDrill();
     preloadRapidNext();
@@ -2405,11 +2527,11 @@
   function startRapidRetry(mistakeId) {
     const m = rapid.mistakes.find((x) => x.id === mistakeId);
     if (!m) return;
+    const base = { hand: m.hand, trials: m.trials, solved: m.solved, solvePromise: Promise.resolve(m.solved),
+      answered: false, assisted: false };
     const quiz = m.mode === 'locked'
-      ? { mode: 'locked', hand: m.hand, trials: m.trials, lockedTwo: m.lockedTwo, rest: m.rest, parts: m.parts,
-          solved: m.solved, solvePromise: Promise.resolve(m.solved), answered: false, chosenCard: null }
-      : { mode: 'arrange', hand: m.hand, trials: m.trials, solved: m.solved, solvePromise: Promise.resolve(m.solved),
-          assignment: { one: [], two: [], four: [] }, selected: null, placeOrder: [], answered: false };
+      ? Object.assign({ mode: 'locked', lockedTwo: m.lockedTwo, rest: m.rest, parts: m.parts, chosenCard: null }, base)
+      : Object.assign({ mode: 'arrange' }, base, emptyArrangeFields());
     rapid.retry = { mistake: m, quiz };
     el('rapidFeedback').classList.add('hidden');
     setRapidView('drill');
@@ -2442,16 +2564,26 @@
   el('btnRapidEstSubmit').addEventListener('click', () => rapidSubmitEstimate());
   el('btnRapidClear').addEventListener('click', () => {
     const quiz = rapidActiveQuiz();
-    if (!quiz || quiz.answered || quiz.mode !== 'arrange') return;
-    quiz.assignment = { one: [], two: [], four: [] };
-    quiz.placeOrder = [];
-    quiz.selected = null;
-    renderRapidArrange();
+    if (!quiz || quiz.answered || !rapidUsesArranger(quiz)) return;
+    Object.assign(quiz, emptyArrangeFields());
+    renderRapidDrill();
   });
   el('btnRapidBack').addEventListener('click', () => {
     rapid = null;
     hide('screen-rapid');
     show('screen-landing');
+  });
+  el('rapidAssist').addEventListener('change', () => {
+    if (!rapid) return;
+    rapid.assist = el('rapidAssist').checked;
+    // Turning the assist on mid-hand marks that hand assisted (you're about to see the
+    // answer); turning it off can't un-see it, so the hand stays marked for the rest of it.
+    const quiz = rapidActiveQuiz();
+    if (quiz && rapid.assist) quiz.assisted = true;
+    renderRapidDrill();
+  });
+  RAPID_CATS.forEach((cat) => {
+    el('rapidEst' + capitalize(cat)).addEventListener('input', renderRapidEstTotal);
   });
   document.querySelectorAll('#rapidModeRow .rapid-mode-btn').forEach((btn) => {
     btn.addEventListener('click', () => setRapidMode(btn.dataset.rapidMode));
@@ -2464,7 +2596,11 @@
   document.addEventListener('keydown', (ev) => {
     if (!rapid || el('screen-rapid').classList.contains('hidden')) return;
     const quiz = rapidActiveQuiz();
-    const typing = ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName);
+    // Only text entry should swallow the number keys — a focused checkbox (the assist
+    // toggle) must not stop 1-7 from placing cards.
+    const t = ev.target;
+    const typing = !!t && (/^(TEXTAREA|SELECT)$/.test(t.tagName)
+      || (t.tagName === 'INPUT' && t.type !== 'checkbox'));
 
     if (ev.key === 'Enter') {
       ev.preventDefault();
@@ -2476,19 +2612,26 @@
 
     if (/^[1-9]$/.test(ev.key)) {
       const i = Number(ev.key) - 1;
-      if (quiz.mode === 'arrange') {
+      if (rapidUsesArranger(quiz)) {
         const tray = rapidTrayCards(quiz);
-        if (i < tray.length) { ev.preventDefault(); rapidPlaceFirstOpen(quiz, tray[i]); quiz.selected = null; renderRapidArrange(); }
+        if (i < tray.length) {
+          ev.preventDefault();
+          rapidPlaceFirstOpen(quiz, tray[i]);
+          quiz.selected = null;
+          renderRapidDrill();
+          // Once the split is complete in estimate mode, jump straight to pricing it.
+          if (quiz.mode === 'estimate' && rapidArrangeComplete(quiz)) el('rapidEstOne').focus();
+        }
       } else if (quiz.mode === 'locked') {
         const choices = sortCards(quiz.rest, cardSortMode);
         if (i < choices.length) { ev.preventDefault(); rapidAnswerLocked(choices[i]); }
       }
       return;
     }
-    if (ev.key === 'Backspace' && quiz.mode === 'arrange' && quiz.placeOrder.length) {
+    if (ev.key === 'Backspace' && rapidUsesArranger(quiz) && quiz.placeOrder.length) {
       ev.preventDefault();
       rapidUnplace(quiz, quiz.placeOrder[quiz.placeOrder.length - 1].card);
-      renderRapidArrange();
+      renderRapidDrill();
     }
   });
 

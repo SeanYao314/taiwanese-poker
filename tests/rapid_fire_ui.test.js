@@ -138,22 +138,65 @@ async function arrangeAllByKeyboard(page) {
       console.log('note: no arrange misses this run, mistake-tab assertions skipped');
     }
 
-    // ---- estimate mode ----
+    // ---- estimate mode: arrange it yourself, then price each hand ----
     await page.click('.rapid-mode-btn[data-rapid-mode="estimate"]');
     await page.waitForSelector('#rapidEstimate:not(.hidden)', { timeout: 60000 });
-    await page.waitForSelector('#rapidEstSplit .playing-card', { timeout: 60000 });
-    assert(await page.locator('#rapidEstSplit .playing-card').count() === 7, 'estimate shows a full 7-card split to price');
-    assert(await page.locator('#rapidEstReveal.hidden').count() === 1, 'the actual EV stays hidden until you guess');
-    await page.fill('#rapidEstInput', '-1.5');
+    await page.waitForSelector('#rTray .playing-card', { timeout: 60000 });
+    assert(await page.locator('#rapidArrange:not(.hidden)').count() === 1, 'estimate mode lets you arrange the hand yourself');
+    assert(await page.locator('#rapidEstGate:not(.hidden)').count() === 1, 'estimate inputs are gated until the split is built');
+    assert(await page.locator('#rapidEstOne').isDisabled(), 'per-hand inputs are disabled before the split is complete');
+
+    await arrangeAllByKeyboard(page);
+    await page.waitForSelector('#rapidEstFields:not(.hidden)', { timeout: 15000 });
+    assert(!(await page.locator('#rapidEstOne').isDisabled()), 'per-hand inputs unlock once all 7 cards are placed');
+    for (const id of ['rapidEstOne', 'rapidEstTwo', 'rapidEstFour']) {
+      assert(await page.locator('#' + id).count() === 1, 'there is an estimate input for ' + id.replace('rapidEst', ''));
+    }
+    await page.fill('#rapidEstOne', '-0.5');
+    await page.fill('#rapidEstTwo', '-1.0');
+    assert(/2\/3 priced/.test(await page.locator('#rapidEstTotal').innerText()), 'running total reports how many hands are priced so far');
+    await page.fill('#rapidEstFour', '1.5');
+    assert(/^[+-]?0\.00$/.test((await page.locator('#rapidEstTotal').innerText()).trim()), 'running total sums the three estimates (' + (await page.locator('#rapidEstTotal').innerText()) + ')');
+
     await page.keyboard.press('Enter');
     await page.waitForSelector('#rapidEstReveal:not(.hidden)', { timeout: 60000 });
     const estReveal = sig(await page.locator('#rapidEstReveal').innerText());
-    assert(/Your estimate: -1\.50/.test(estReveal), 'estimate reveal echoes your guess');
-    assert(/Actual:/.test(estReveal), 'estimate reveal shows the actual EV');
-    assert(/1-Card Hand/.test(estReveal) && /4-Card PLO Hand/.test(estReveal), 'estimate reveal breaks EV down per hand');
+    assert(/1-Card Hand/.test(estReveal) && /2-Card Hand/.test(estReveal) && /4-Card PLO Hand/.test(estReveal), 'reveal grades all three hands separately');
+    assert(/you said -0\.50/.test(estReveal), 'reveal echoes each per-hand estimate');
+    assert(/Homerun bonus/.test(estReveal), 'reveal breaks the homerun bonus out separately from the three hands');
+    assert(/Whole split is worth/.test(estReveal), 'reveal reports the whole split\'s EV');
     const estStats = sig(await page.locator('#rapidStats').innerText()).toUpperCase();
-    assert(/AVG ESTIMATE ERROR/.test(estStats), 'estimate mode tracks average estimate error instead of EV lost');
+    assert(/AVG TOTAL EV ERROR/.test(estStats), 'estimate mode tracks average total EV error');
+    assert(/PER-HAND ERR/.test(estStats), 'estimate mode tracks average per-hand error');
     assert(/BIAS/.test(estStats), 'estimate mode reports calibration bias');
+
+    // ---- live EV assist ----
+    await page.click('#btnRapidNext');
+    await page.waitForSelector('#rTray .playing-card', { timeout: 60000 });
+    assert(await page.locator('#rapidLiveEv.hidden').count() === 1, 'live EV panel is off by default');
+    await page.check('#rapidAssist');
+    await page.waitForSelector('#rapidLiveEv:not(.hidden)', { timeout: 15000 });
+    const emptyLive = sig(await page.locator('#rapidLiveEv').innerText());
+    assert(/1-card/.test(emptyLive) && /4-card PLO/.test(emptyLive) && /Total/.test(emptyLive),
+      'live EV panel prices each hand plus the total');
+    assert((emptyLive.match(/—/g) || []).length >= 4, 'unpriced hands show a dash rather than a misleading number');
+    await page.keyboard.press('1');
+    await page.waitForTimeout(150);
+    assert(/1-card [+-]\d/.test(sig(await page.locator('#rapidLiveEv').innerText())), 'a hand prices itself as soon as it is full');
+    await arrangeAllByKeyboard(page);
+    await page.waitForTimeout(250);
+    const fullLive = sig(await page.locator('#rapidLiveEv').innerText());
+    assert(/Homerun [+-]?\d/.test(fullLive), 'the homerun bonus appears once the whole split exists');
+    assert(/not scored/.test(fullLive), 'the panel says assisted hands are not scored');
+    const beforeAssisted = sig(await page.locator('#rapidStats').innerText());
+    await page.fill('#rapidEstOne', '0');
+    await page.fill('#rapidEstTwo', '0');
+    await page.fill('#rapidEstFour', '0');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#rapidEstReveal:not(.hidden)', { timeout: 60000 });
+    assert(/assisted, not scored/.test(sig(await page.locator('#rapidFeedback').innerText())), 'an assisted hand is flagged in the feedback');
+    assert(sig(await page.locator('#rapidStats').innerText()) === beforeAssisted, 'an assisted hand does not move the session stats');
+    await page.uncheck('#rapidAssist');
 
     // ---- locked NLH mode ----
     await page.click('#btnRapidNext');
