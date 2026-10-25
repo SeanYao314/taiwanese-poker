@@ -608,8 +608,8 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 
 .rapid-hand-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-.rapid-options { display: flex; flex-direction: column; gap: 8px; }
-.rapid-option {
+.rapid-locked-choices { display: flex; flex-direction: column; gap: 8px; }
+.rapid-locked-choice {
   display: flex;
   align-items: center;
   gap: 14px;
@@ -623,9 +623,9 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   font: inherit;
   transition: border-color .12s, background .12s, transform .08s;
 }
-.rapid-option:hover:not(:disabled) { border-color: var(--felt); background: #f6f9f7; }
-.rapid-option:active:not(:disabled) { transform: scale(.995); }
-.rapid-option:disabled { cursor: default; }
+.rapid-locked-choice:hover:not(:disabled) { border-color: var(--felt); background: #f6f9f7; }
+.rapid-locked-choice:active:not(:disabled) { transform: scale(.995); }
+.rapid-locked-choice:disabled { cursor: default; }
 .rapid-opt-num {
   flex: 0 0 auto;
   width: 26px;
@@ -639,17 +639,17 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   align-items: center;
   justify-content: center;
 }
-.rapid-opt-cards { display: flex; flex-wrap: wrap; gap: 14px; flex: 1; }
-.rapid-opt-group { display: flex; align-items: center; gap: 5px; }
+.rapid-split-groups { display: flex; flex-wrap: wrap; gap: 14px; flex: 1; }
+.rapid-split-group { display: flex; align-items: center; gap: 5px; }
 .rapid-opt-meta { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .rapid-opt-ev { font-weight: 800; font-size: .9rem; }
 .rapid-opt-loss { font-weight: 800; font-size: .8rem; color: var(--danger); }
 
-.rapid-option.is-best { border-color: #1a7f37; background: #f0fbf3; }
-.rapid-option.is-best .rapid-opt-num { background: #1a7f37; color: #fff; }
-.rapid-option.is-close { border-color: #9fcfae; background: #f7fdf9; }
-.rapid-option.is-chosen { box-shadow: 0 0 0 3px rgba(26,127,55,.12); }
-.rapid-option.is-chosen:not(.is-best):not(.is-close) {
+.rapid-locked-choice.is-best { border-color: #1a7f37; background: #f0fbf3; }
+.rapid-locked-choice.is-best .rapid-opt-num { background: #1a7f37; color: #fff; }
+.rapid-locked-choice.is-close { border-color: #9fcfae; background: #f7fdf9; }
+.rapid-locked-choice.is-chosen { box-shadow: 0 0 0 3px rgba(26,127,55,.12); }
+.rapid-locked-choice.is-chosen:not(.is-best):not(.is-close) {
   border-color: var(--danger);
   background: #fef6f5;
   box-shadow: 0 0 0 3px rgba(192,57,43,.1);
@@ -691,7 +691,122 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .rm-actions button { padding: 7px 13px; font-size: .82rem; }
 
 @media (max-width: 640px) {
-  .rapid-option { flex-wrap: wrap; gap: 8px; }
+  .rapid-locked-choice { flex-wrap: wrap; gap: 8px; }
   .rapid-opt-meta { margin-left: 0; }
   .rapid-stat.tiers { margin-left: 0; }
+}
+
+/* ---------- rapid fire: mode switcher ---------- */
+.rapid-mode-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.rapid-mode-btn {
+  border: 2px solid #e5e7eb;
+  background: #fff;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-weight: 700;
+  font-size: .85rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+.rapid-mode-btn:hover:not(:disabled):not(.active) { border-color: var(--felt); color: var(--ink); }
+.rapid-mode-btn.active { background: var(--felt); border-color: var(--felt); color: #fff; }
+.rapid-mode-btn:disabled { opacity: .5; cursor: not-allowed; }
+#rapidModeHint { margin-top: 0; margin-bottom: 16px; }
+
+/* ---------- rapid fire: arrange ---------- */
+#rapidSlots .slot-cards { min-height: 76px; }
+.rapid-tray-key {
+  position: absolute;
+  top: 2px;
+  left: 3px;
+  font-size: .55rem;
+  font-weight: 800;
+  color: var(--muted);
+  background: rgba(255,255,255,.85);
+  border-radius: 4px;
+  padding: 0 3px;
+  pointer-events: none;
+}
+#rTray .playing-card { position: relative; }
+
+/* ---------- rapid fire: shared split display ---------- */
+.rapid-split-groups { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.rapid-split-group { display: flex; align-items: center; gap: 5px; }
+.rapid-best-reveal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(0,0,0,.12);
+}
+
+/* ---------- rapid fire: estimate ---------- */
+.rapid-est-split {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  background: #f6f7f9;
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+.rapid-est-input-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rapid-est-input-row label { margin: 0; font-size: .85rem; font-weight: 700; color: var(--ink); }
+.rapid-est-input-row input {
+  width: 140px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #d9dce1;
+  border-radius: 10px;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+.rapid-est-input-row .primary { width: auto; }
+.rapid-est-reveal {
+  margin-top: 16px;
+  background: #f6f7f9;
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+.rapid-est-compare {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-size: 1rem;
+  padding-bottom: 12px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid #e5e7eb;
+}
+.rapid-est-compare .pscore.pos { color: #1a7f37; }
+.rapid-est-compare .pscore.neg { color: var(--danger); }
+.rapid-est-err { font-weight: 700; color: var(--muted); }
+
+/* ---------- rapid fire: locked NLH ---------- */
+.rapid-locked-two {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #fffdf5;
+  border: 1px solid #f0d488;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.rapid-locked-choices { display: flex; flex-direction: column; gap: 8px; }
+.rlc-part { display: flex; align-items: center; gap: 5px; }
+.rapid-locked-choice .rlc-part + .rlc-part { margin-left: 10px; }
+
+.rm-mode {
+  font-size: .72rem;
+  font-weight: 700;
+  color: var(--muted);
+  background: #eef0f2;
+  border-radius: 999px;
+  padding: 3px 9px;
 }

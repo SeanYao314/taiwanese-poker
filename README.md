@@ -92,47 +92,71 @@ Homerun scoring is always included here too, the same as in live games — there
 
 The opponent itself is homerun-aware too, not just the scoring: `public/opponent-pool.json` is solved by `experiments/solve/solve_round_hr.js` + `solve_fixed_hr.js` under the exact same full-match-sweep homerun rule the live game uses, so the opponent you're practicing against has actually adapted its splits to the sweep bonus, not just a standard-optimal opponent with the bonus tacked onto the scoring. See "Strategy research" below for how that pool was solved.
 
-## Rapid Fire (GTO drill)
+## Rapid Fire (GTO drills)
 
-The landing page's **Rapid Fire** tab is a fast drill on the only real decision this game
-has: given 7 cards, which 1/2/4 split is best? You get a hand and five candidate splits, and
-you pick the one you think has the highest EV — with the number keys, which is what makes it
-rapid. A correct pick chimes and deals the next hand automatically; a miss waits, so you can
-actually study the better split before it disappears.
+The landing page's **Rapid Fire** tab holds three drills on the only real decision this game
+has. All three score against the same homerun-solved opponents Practice Mode uses (with the
+full-match-sweep bonus, since it's always on), and all three draw their hands from the solved
+pool itself, so the offline solver's own split for a hand is always reachable. "Best" is
+always whatever genuinely graded best on that hand's boards, never an assumption about what
+the solver picked.
 
-Everything is graded live rather than looked up. When a hand comes up, 14 candidate splits
-are scored against the same 120 board runouts, against the same homerun-solved opponents
-Practice Mode plays (the full-match-sweep homerun bonus included, since that's always on).
-One of the candidates is always the offline solver's own pick for that hand, since the quiz
-hands are drawn from the solved pool itself. The five you actually see are the top three
-plus a mid-pack and a worst option — clustered at the top on purpose, because a uniform
-spread makes nearly every wrong answer a blunder, which teaches nothing. The "best" answer
-is whatever genuinely graded best on those boards, not an assumption about which one the
-solver picked.
+### Arrange
 
-**Close counts.** Anything within 0.15 pts/hand of the top option is scored correct — two
-splits that close are a coin flip over 120 boards anyway (well inside the standard error),
-so demanding the exact argmax would just be grading Monte Carlo noise. Everything else is
-graded by how much EV it cost you, chess-style:
+You're dealt 7 cards and build the 1/2/4 split yourself — the same click-a-card-then-click-a-hand
+interaction as Practice Mode, plus number keys to drop the next card into the first open
+slot and Backspace to undo, which is what makes it fast. Submit and it's graded against
+**all 105 ways to split that hand**, so you get a true rank (`#12 of 105`) rather than a
+comparison against a handful of alternatives. The full 105-partition solve runs in the
+background from the moment the hand is dealt, so by the time anyone has placed seven cards
+the answer is already waiting.
 
-| | EV lost per hand |
-|---|---|
-| **Best** (`!`) | ≤ 0.15 |
-| **Inaccuracy** (`?!`) | 0.15 – 0.75 |
-| **Mistake** (`?`) | 0.75 – 2.0 |
-| **Blunder** (`??`) | > 2.0 |
+### Estimate EV
 
-The header tracks a **running average EV loss per hand** — the single number worth watching,
-since it's the rate you'd actually bleed chips at — plus how often you found the best split,
-your current streak, and a count of each tier. After answering, every option reveals its EV
-and what it would have cost, with the best one highlighted.
+You're shown a split and type what you think it's worth in points per hand. This is the one
+that builds a repeatable read: instead of pattern-matching shapes, you have to actually price
+a holding, and the reveal breaks the result down per hand and per board so you can see *which*
+hand your read was wrong about. Half the splits shown are the solver's own and half are
+randomly generated, because estimating only good splits teaches you the range of "fine" and
+nothing about the range of "bad". Alongside average error it tracks **bias** — whether you're
+systematically optimistic or pessimistic — which is usually the more fixable problem.
 
-Misses collect in a **Mistakes tab**, each showing the hand with what you picked next to
-what was best. **Retry this hand** replays that exact hand, the exact same boards and the
-same options (reshuffled, so you can't just remember the position), graded identically — so
-a retry is a real second attempt at the same problem rather than a fresh one. Retries
-deliberately do **not** move the session average, since otherwise you could grind it down by
-redrilling hands you've already memorized; they just mark the mistake fixed.
+### Locked NLH
+
+The 2-card NLH hand is fixed for you (the solver's own choice for that holding), and you pick
+which of the five remaining cards plays alone, with the other four becoming the PLO hand. It
+isolates the back-end decision: given a reasonable NLH hand, can you maximize what's left?
+Five completions means it grades exhaustively and instantly.
+
+### Grading
+
+**Close counts.** Anything within 0.15 pts/hand of the best counts as correct — two splits
+that close are a coin flip over this many boards (well inside the standard error), so
+demanding the exact argmax would just be grading Monte Carlo noise. Everything else is graded
+by the EV it cost, chess-style:
+
+| | Arrange / Locked NLH — EV lost | Estimate EV — error |
+|---|---|---|
+| **Best** / **Sharp** (`!`) | ≤ 0.15 | ≤ 0.75 |
+| **Inaccuracy** / **Close** (`?!`) | 0.15 – 0.75 | 0.75 – 2.0 |
+| **Mistake** / **Off** (`?`) | 0.75 – 2.0 | 2.0 – 4.0 |
+| **Blunder** / **Way off** (`??`) | > 2.0 | > 4.0 |
+
+A correct answer chimes and deals the next hand automatically; a miss waits, so you can study
+the better split before it disappears. The header tracks a **running average EV loss per
+hand** — the number worth watching, since it's the rate you'd actually bleed chips at — plus
+how often you found the best, your streak, and a count of each tier. Stats are kept per drill,
+since "average EV lost" and "average estimate error" aren't the same measurement.
+
+### Mistakes tab
+
+Misses from Arrange and Locked NLH collect in a **Mistakes tab**, each showing the hand with
+what you played next to what was best. **Retry this hand** replays that exact hand and the
+exact same boards, graded against the same solve, with your arrangement cleared so you have to
+rebuild it rather than recognize a position. Retries deliberately do **not** move the session
+average — otherwise you could grind it down by redrilling hands you've already memorized —
+they just mark the mistake fixed. Estimate EV is intentionally not retryable: once you've been
+told the answer, re-guessing the same hand tests memory, not calibration.
 
 ## Deploying so friends can join over the internet
 

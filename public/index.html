@@ -69,14 +69,15 @@
 
       <div id="tab-rapid" class="tab-content hidden">
         <p class="hint" style="margin-top:0;">
-          Rapid-fire drill on the only real decision in this game: you get a hand and five
-          candidate splits, and you pick the one with the highest EV. Every option is graded
-          live against the same 120 board runouts, against the same homerun-solved opponents
-          Practice Mode uses &mdash; and one of the five is always the offline solver's own
-          pick for that hand. Close counts: anything within 0.15 pts/hand of the top option
-          is scored correct. Misses are graded as an <strong>inaccuracy</strong>,
-          <strong>mistake</strong>, or <strong>blunder</strong> by how much EV they cost, and
-          collected in a Mistakes tab you can drill again. Answer with the number keys.
+          Fast drills on the only real decision in this game, in three flavours:
+          <strong>Arrange</strong> deals you a hand and you build the split yourself, graded
+          against the true best of all 105 ways to split it. <strong>Estimate EV</strong>
+          shows you a split and asks what it's worth, so you build a repeatable read rather
+          than just recognizing shapes. <strong>Locked NLH</strong> fixes the 2-card hand and
+          asks you to maximize the 1-card and PLO hands around it. Everything is scored live
+          against the homerun-solved opponents Practice Mode uses. Misses are graded
+          <strong>inaccuracy</strong>/<strong>mistake</strong>/<strong>blunder</strong> by the
+          EV they cost and collected in a Mistakes tab you can re-drill.
         </p>
         <button id="btnRapidStart" class="primary">Start Rapid Fire</button>
       </div>
@@ -190,7 +191,7 @@
   <section id="screen-rapid" class="screen hidden">
     <div class="card-panel wide">
       <div class="game-header">
-        <h2>Rapid Fire <span class="hint-inline">&mdash; pick the highest-EV split</span></h2>
+        <h2>Rapid Fire <span class="hint-inline">&mdash; drill the split decision</span></h2>
         <div class="actions" style="width:auto;">
           <button id="btnRapidBack" class="secondary">Back to Menu</button>
         </div>
@@ -199,25 +200,75 @@
       <div id="rapidStats" class="rapid-stats"></div>
 
       <div class="tabs rapid-tabs" id="rapidTabs">
-        <button class="tab-btn active" data-rapid-tab="quiz">Quiz</button>
+        <button class="tab-btn active" data-rapid-tab="drill">Drill</button>
         <button class="tab-btn" data-rapid-tab="mistakes">Mistakes (<span id="rapidMistakeCount">0</span>)</button>
       </div>
 
-      <div id="rapid-tab-quiz">
+      <div id="rapid-tab-drill">
         <p id="rapidRetryBanner" class="rapid-retry-banner hidden"></p>
 
-        <div class="tray-title-row" style="margin-bottom:8px;">
-          <div id="rapidHandRow" class="rapid-hand-row"></div>
-          <span class="sort-control" id="rapidSortControl">
-            <span class="sort-label">Sort:</span>
-            <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
-            <button type="button" class="sort-btn" data-sort="rank">Rank</button>
-            <button type="button" class="sort-btn" data-sort="suit">Suit</button>
-          </span>
+        <div class="rapid-mode-row" id="rapidModeRow">
+          <button type="button" class="rapid-mode-btn active" data-rapid-mode="arrange">Arrange</button>
+          <button type="button" class="rapid-mode-btn" data-rapid-mode="estimate">Estimate EV</button>
+          <button type="button" class="rapid-mode-btn" data-rapid-mode="locked">Locked NLH</button>
+        </div>
+        <p id="rapidModeHint" class="hint"></p>
+
+        <div id="rapidLoading" class="hint hidden">Dealing and solving&hellip;</div>
+
+        <!-- ARRANGE: build the split yourself -->
+        <div id="rapidArrange" class="hidden">
+          <div class="slots" id="rapidSlots">
+            <div class="slot" data-rslot="one">
+              <div class="slot-title">1-Card Hand <span class="pt">worth 1 pt / board</span></div>
+              <div class="slot-cards" id="rSlotOne"></div>
+            </div>
+            <div class="slot" data-rslot="two">
+              <div class="slot-title">2-Card Hand <span class="pt">worth 2 pt / board</span></div>
+              <div class="slot-cards" id="rSlotTwo"></div>
+            </div>
+            <div class="slot" data-rslot="four">
+              <div class="slot-title">4-Card PLO Hand <span class="pt">worth 3 pt / board</span></div>
+              <div class="slot-cards" id="rSlotFour"></div>
+            </div>
+          </div>
+
+          <div class="tray-wrap">
+            <div class="slot-title tray-title-row">
+              <span>Your Cards <span class="hint-inline">(click a card then a hand &mdash; or press the number on a card to drop it in the first open slot)</span></span>
+              <span class="sort-control" id="rapidSortControl">
+                <span class="sort-label">Sort:</span>
+                <button type="button" class="sort-btn" data-sort="dealt">Dealt</button>
+                <button type="button" class="sort-btn" data-sort="rank">Rank</button>
+                <button type="button" class="sort-btn" data-sort="suit">Suit</button>
+              </span>
+            </div>
+            <div class="tray" id="rTray"></div>
+          </div>
+
+          <div class="actions">
+            <button id="btnRapidClear" class="secondary">Clear</button>
+            <button id="btnRapidSubmit" class="primary" disabled>Submit (Enter)</button>
+          </div>
         </div>
 
-        <p id="rapidPrompt" class="hint"></p>
-        <div id="rapidOptions" class="rapid-options"></div>
+        <!-- ESTIMATE: read a split and price it -->
+        <div id="rapidEstimate" class="hidden">
+          <div id="rapidEstSplit" class="rapid-est-split"></div>
+          <div class="rapid-est-input-row">
+            <label for="rapidEstInput">EV estimate (pts/hand)</label>
+            <input id="rapidEstInput" type="number" step="0.1" placeholder="e.g. -1.5" />
+            <button id="btnRapidEstSubmit" class="primary">Submit (Enter)</button>
+          </div>
+          <div id="rapidEstReveal" class="rapid-est-reveal hidden"></div>
+        </div>
+
+        <!-- LOCKED NLH: 2-card hand fixed, choose the 1-card hand -->
+        <div id="rapidLocked" class="hidden">
+          <div id="rapidLockedTwo" class="rapid-locked-two"></div>
+          <div id="rapidLockedChoices" class="rapid-locked-choices"></div>
+        </div>
+
         <div id="rapidFeedback" class="rapid-feedback hidden"></div>
         <div class="actions" style="margin-top:14px;">
           <button id="btnRapidNext" class="primary hidden">Next Hand (Enter)</button>

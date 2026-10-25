@@ -1,13 +1,14 @@
-// End-to-end UI test for Rapid Fire, driven through real Chromium against the real server.
-// Run with: node tests/rapid_fire_ui.test.js
+// End-to-end UI test for Rapid Fire's three drills, driven through real Chromium against
+// the real server. Run with: node tests/rapid_fire_ui.test.js
 //
 // Unlike tests/poker.test.js this one is NOT dependency-free: it needs `playwright` with a
-// Chromium available (the environment this was developed in ships both). It starts its own
-// server on PORT_TEST and shuts it down afterwards, so nothing needs to be running first.
-// It exists because the quiz's grading, tier classification, stats and mistake-retry flow
-// all live in the browser, where the dependency-free node tests can't reach them -- and
-// because reusing the .tab-btn class for Rapid Fire's in-screen tabs silently broke the
-// landing page's tab handler the first time, which only a real DOM catches.
+// Chromium available (it skips itself cleanly if that's missing). It starts its own server
+// on PORT_TEST and shuts it down afterwards.
+//
+// It exists because the grading, tier classification, stats and mistake-retry flow all live
+// in the browser, where the dependency-free node tests can't reach them -- and because
+// reusing the .tab-btn class for Rapid Fire's in-screen tabs silently broke the landing
+// page's tab handler once, which only a real DOM catches.
 const { spawn } = require('child_process');
 const path = require('path');
 
@@ -20,30 +21,37 @@ function assert(cond, msg) {
 }
 const sig = (t) => t.replace(/\s+/g, ' ').trim();
 
+const TIER_SELECTOR = '#rapidFeedback.tier-best, #rapidFeedback.tier-inaccuracy, #rapidFeedback.tier-mistake, #rapidFeedback.tier-blunder';
+async function gradedTier(page) {
+  const cls = await page.locator('#rapidFeedback').getAttribute('class');
+  const m = /tier-(\w+)/.exec(cls || '');
+  return m ? m[1] : null;
+}
+
 async function waitForServer(url, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) return true;
-    } catch (_) { /* not up yet */ }
+    try { if ((await fetch(url)).ok) return true; } catch (_) { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error('server did not come up at ' + url);
 }
 
+// Fill the three slots from the tray by pressing the number key on each remaining card.
+async function arrangeAllByKeyboard(page) {
+  for (let i = 0; i < 7; i++) {
+    await page.keyboard.press('1');
+    await page.waitForTimeout(30);
+  }
+}
+
 (async () => {
   let playwright;
-  try {
-    playwright = require('playwright');
-  } catch (e) {
-    console.log('SKIP: playwright not installed — skipping Rapid Fire UI test');
-    process.exit(0);
-  }
+  try { playwright = require('playwright'); }
+  catch (e) { console.log('SKIP: playwright not installed — skipping Rapid Fire UI test'); process.exit(0); }
 
   const server = spawn('node', [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(PORT) },
-    stdio: 'ignore'
+    env: { ...process.env, PORT: String(PORT) }, stdio: 'ignore'
   });
   const cleanup = () => { try { server.kill(); } catch (_) {} };
   process.on('exit', cleanup);
@@ -53,74 +61,117 @@ async function waitForServer(url, timeoutMs = 15000) {
     await waitForServer(`http://localhost:${PORT}/`);
     const page = await browser.newPage();
     const errors = [];
-    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-    page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
+    page.on('console', (m) => { if (m.type() === 'error') { errors.push(m.text()); console.error('  [browser error]', m.text()); } });
+    page.on('pageerror', (e) => { errors.push('pageerror: ' + e.message); console.error('  [browser pageerror]', e.message, e.stack ? '\n' + e.stack.split('\n').slice(0,3).join('\n') : ''); });
 
     await page.goto(`http://localhost:${PORT}/`);
     await page.click('.tab-btn[data-tab="rapid"]');
     await page.click('#btnRapidStart');
-    await page.waitForSelector('#rapidOptions .rapid-option', { timeout: 60000 });
 
-    assert(await page.locator('#rapidOptions .rapid-option').count() === 5, 'quiz shows 5 candidate splits');
-    assert(await page.locator('#rapidHandRow .playing-card').count() === 7, 'quiz shows the full 7-card hand');
-    assert(await page.locator('#rapidOptions .rapid-opt-ev').count() === 0, "option EVs stay hidden until you've answered");
+    // ---- arrange mode ----
+    await page.waitForSelector('#rapidArrange:not(.hidden)', { timeout: 60000 });
+    await page.waitForSelector('#rTray .playing-card', { timeout: 60000 });
+    assert(await page.locator('#rTray .playing-card').count() === 7, 'arrange deals 7 cards into the tray');
+    assert(await page.locator('#btnRapidSubmit').isDisabled(), 'submit is disabled until all 7 cards are placed');
 
-    // Play a batch of hands, always answering option 1 by keyboard (rapid-fire input path).
-    let best = 0, misses = 0;
-    const HANDS = 8;
-    for (let i = 0; i < HANDS; i++) {
-      await page.waitForSelector('#rapidOptions .rapid-option:not([disabled])', { timeout: 60000 });
-      await page.keyboard.press('1');
-      await page.waitForSelector('#rapidFeedback:not(.hidden)', { timeout: 30000 });
-      const wasBest = /Best split/.test(sig(await page.locator('#rapidFeedback').innerText()));
-      if (wasBest) best++; else misses++;
-      if (i === 0) {
-        assert(await page.locator('#rapidOptions .rapid-opt-ev').count() === 5, 'answering reveals every option\'s EV');
-        assert(await page.locator('#rapidOptions .rapid-option.is-best').count() === 1, 'exactly one option is flagged best');
-      }
-      if (wasBest) await page.waitForTimeout(1300); // correct answers auto-advance
-      else await page.click('#btnRapidNext');
+    // place one card into the 1-card slot by clicking, then the rest by keyboard
+    await page.locator('#rTray .playing-card').first().click();
+    await page.locator('#rapidSlots .slot[data-rslot="one"]').click();
+    assert(await page.locator('#rSlotOne .playing-card').count() === 1, 'click-card-then-click-slot places a card');
+    await page.keyboard.press('Backspace');
+    assert(await page.locator('#rSlotOne .playing-card').count() === 0, 'Backspace undoes the last placement');
+
+    await arrangeAllByKeyboard(page);
+    const placed = await page.locator('#rapidSlots .playing-card').count();
+    assert(placed === 7, 'number keys fill every slot (placed ' + placed + ')');
+    assert(await page.locator('#rSlotOne .playing-card').count() === 1
+      && await page.locator('#rSlotTwo .playing-card').count() === 2
+      && await page.locator('#rSlotFour .playing-card').count() === 4, 'slots fill to the 1/2/4 shape');
+    assert(!(await page.locator('#btnRapidSubmit').isDisabled()), 'submit unlocks once the split is complete');
+
+    await page.keyboard.press('Enter');
+    await page.waitForSelector(TIER_SELECTOR, { timeout: 90000 });
+    const aFb = sig(await page.locator('#rapidFeedback').innerText());
+    assert(/ranked #\d+ of 105/.test(aFb), 'arrange grades against all 105 partitions (' + aFb.slice(0, 80) + ')');
+    const firstTier = await gradedTier(page);
+    assert(['best', 'inaccuracy', 'mistake', 'blunder'].includes(firstTier), 'arrange reports a tier (' + firstTier + ')');
+    const arrangeWasBest = firstTier === 'best';
+
+    // play a few more hands to accumulate stats and (very likely) a mistake
+    let misses = arrangeWasBest ? 0 : 1;
+    if (arrangeWasBest) await page.waitForTimeout(1300); else await page.click('#btnRapidNext');
+    for (let i = 0; i < 4; i++) {
+      await page.waitForSelector('#rTray .playing-card', { timeout: 90000 });
+      await arrangeAllByKeyboard(page);
+      await page.keyboard.press('Enter');
+      await page.waitForSelector(TIER_SELECTOR, { timeout: 90000 });
+      const best = (await gradedTier(page)) === 'best';
+      if (!best) misses++;
+      if (best) await page.waitForTimeout(1300); else await page.click('#btnRapidNext');
     }
+    const statsTxt = sig(await page.locator('#rapidStats').innerText()).toUpperCase();
+    assert(/HANDS 5/.test(statsTxt), 'arrange stats counted all 5 hands');
+    assert(/AVG EV LOST \/ HAND/.test(statsTxt), 'arrange shows a running average EV loss');
+    const avgArrange = (await page.locator('.rapid-stat.headline .rs-value').innerText()).trim();
+    assert(/^\d+\.\d{3}$/.test(avgArrange), 'average EV loss is numeric (' + avgArrange + ')');
 
-    const handsShown = sig(await page.locator('#rapidStats').innerText());
-    assert(new RegExp('HANDS ' + HANDS).test(handsShown.toUpperCase()), `stats counted all ${HANDS} hands`);
-    const avg = (await page.locator('.rapid-stat.headline .rs-value').innerText()).trim();
-    assert(/^\d+\.\d{3}$/.test(avg), 'running average EV loss renders as a number (' + avg + ')');
-    assert(best + misses === HANDS, 'every hand was graded as best or a miss');
-    assert(Number(await page.locator('#rapidMistakeCount').innerText()) === misses, 'mistake tab badge matches the miss count');
-
+    // ---- mistakes tab + retry (arrange) ----
     if (misses > 0) {
       await page.click('.tab-btn[data-rapid-tab="mistakes"]');
       await page.waitForSelector('.rapid-mistake');
-      assert(await page.locator('.rapid-mistake').count() === misses, 'every miss is listed in the Mistakes tab');
-
+      assert(await page.locator('.rapid-mistake').count() === misses, 'every arrange miss is listed in Mistakes');
       const first = page.locator('.rapid-mistake').first();
-      const bestSplitSig = sig(await first.locator('.rm-line.good .rapid-opt-cards').innerText());
-      assert(bestSplitSig.length > 0, 'mistake entry shows what the best split was');
-
+      assert(/Arrange|Locked NLH/.test(sig(await first.locator('.rm-mode').innerText())), 'mistake entry records which drill it came from');
       await first.locator('button', { hasText: 'Retry' }).click();
       await page.waitForSelector('#rapidRetryBanner:not(.hidden)');
-      const opts = page.locator('#rapidOptions .rapid-option');
-      const n = await opts.count();
-      let target = -1;
-      for (let i = 0; i < n; i++) {
-        if (sig(await opts.nth(i).locator('.rapid-opt-cards').innerText()) === bestSplitSig) { target = i; break; }
-      }
-      assert(target >= 0, 'the retry offers the same options as the original hand');
-      await opts.nth(target).click();
-      await page.waitForSelector('#rapidFeedback:not(.hidden)');
-      assert(/Fixed/.test(sig(await page.locator('#rapidFeedback').innerText())), 'picking the best split on a retry reports it fixed');
-
+      assert(await page.locator('#rapidSlots .playing-card').count() === 0, 'retry clears the arrangement so it has to be rebuilt');
+      await page.waitForSelector('#rTray .playing-card');
+      await arrangeAllByKeyboard(page);
+      await page.keyboard.press('Enter');
+      await page.waitForSelector(TIER_SELECTOR, { timeout: 90000 });
       await page.click('#btnRapidNext');
       await page.waitForSelector('.rapid-mistake');
       const avgAfter = (await page.locator('.rapid-stat.headline .rs-value').innerText()).trim();
-      assert(avgAfter === avg, 'a retry does not move the session average (' + avg + ')');
-      assert(await page.locator('.rapid-mistake.resolved').count() >= 1, 'the drilled mistake is marked resolved');
+      assert(avgAfter === avgArrange, 'a retry does not move the session average (' + avgArrange + ')');
+      await page.click('.tab-btn[data-rapid-tab="drill"]');
     } else {
-      console.log('note: no misses this run, mistake-tab assertions skipped');
+      console.log('note: no arrange misses this run, mistake-tab assertions skipped');
     }
 
-    assert(errors.length === 0, 'no console/page errors during the drill' + (errors.length ? ' — ' + errors.join(' | ') : ''));
+    // ---- estimate mode ----
+    await page.click('.rapid-mode-btn[data-rapid-mode="estimate"]');
+    await page.waitForSelector('#rapidEstimate:not(.hidden)', { timeout: 60000 });
+    await page.waitForSelector('#rapidEstSplit .playing-card', { timeout: 60000 });
+    assert(await page.locator('#rapidEstSplit .playing-card').count() === 7, 'estimate shows a full 7-card split to price');
+    assert(await page.locator('#rapidEstReveal.hidden').count() === 1, 'the actual EV stays hidden until you guess');
+    await page.fill('#rapidEstInput', '-1.5');
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#rapidEstReveal:not(.hidden)', { timeout: 60000 });
+    const estReveal = sig(await page.locator('#rapidEstReveal').innerText());
+    assert(/Your estimate: -1\.50/.test(estReveal), 'estimate reveal echoes your guess');
+    assert(/Actual:/.test(estReveal), 'estimate reveal shows the actual EV');
+    assert(/1-Card Hand/.test(estReveal) && /4-Card PLO Hand/.test(estReveal), 'estimate reveal breaks EV down per hand');
+    const estStats = sig(await page.locator('#rapidStats').innerText()).toUpperCase();
+    assert(/AVG ESTIMATE ERROR/.test(estStats), 'estimate mode tracks average estimate error instead of EV lost');
+    assert(/BIAS/.test(estStats), 'estimate mode reports calibration bias');
+
+    // ---- locked NLH mode ----
+    await page.click('#btnRapidNext');
+    await page.click('.rapid-mode-btn[data-rapid-mode="locked"]');
+    await page.waitForSelector('#rapidLocked:not(.hidden)', { timeout: 60000 });
+    await page.waitForSelector('.rapid-locked-choice', { timeout: 60000 });
+    assert(await page.locator('#rapidLockedTwo .playing-card').count() === 2, 'locked mode shows the fixed 2-card NLH hand');
+    assert(await page.locator('.rapid-locked-choice').count() === 5, 'locked mode offers the 5 ways to finish the hand');
+    const firstChoice = page.locator('.rapid-locked-choice').first();
+    assert(await firstChoice.locator('.rlc-part').count() === 2, 'each completion shows its 1-card and PLO hands');
+    await page.keyboard.press('1');
+    await page.waitForSelector(TIER_SELECTOR, { timeout: 90000 });
+    const lFb = sig(await page.locator('#rapidFeedback').innerText());
+    assert(/of 5 completions/.test(lFb), 'locked mode ranks the choice among the 5 completions (' + lFb.slice(0, 70) + ')');
+    assert(await page.locator('.rapid-locked-choice .rapid-opt-ev').count() === 5, 'answering reveals every completion\'s EV');
+    assert(await page.locator('.rapid-locked-choice.is-best').count() === 1, 'exactly one completion is flagged best');
+
+    assert(errors.length === 0, 'no console/page errors during the drills' + (errors.length ? ' — ' + errors.join(' | ') : ''));
   } finally {
     await browser.close();
     cleanup();
