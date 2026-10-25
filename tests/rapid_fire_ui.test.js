@@ -196,6 +196,32 @@ async function arrangeAllByKeyboard(page) {
     await page.waitForSelector('#rapidEstReveal:not(.hidden)', { timeout: 60000 });
     assert(/assisted, not scored/.test(sig(await page.locator('#rapidFeedback').innerText())), 'an assisted hand is flagged in the feedback');
     assert(sig(await page.locator('#rapidStats').innerText()) === beforeAssisted, 'an assisted hand does not move the session stats');
+    // ---- a sharp estimate must NOT auto-advance: the reveal is the lesson ----
+    // Copying the live-EV numbers exactly is a deterministic way to force a "Sharp" grade,
+    // which is the case that used to get yanked off screen after 1.6s.
+    await page.click('#btnRapidNext');
+    await page.waitForSelector('#rTray .playing-card', { timeout: 60000 });
+    await arrangeAllByKeyboard(page);
+    await page.waitForTimeout(400);
+    const live = await page.evaluate(() => {
+      const out = {};
+      document.querySelectorAll('#rapidLiveEv .rle-item').forEach((it) => {
+        out[it.querySelector('.rle-label').textContent.trim()] = it.querySelector('.rle-val').textContent.trim();
+      });
+      return out;
+    });
+    await page.fill('#rapidEstOne', live['1-card'].replace('+', ''));
+    await page.fill('#rapidEstTwo', live['2-card'].replace('+', ''));
+    await page.fill('#rapidEstFour', live['4-card PLO'].replace('+', ''));
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('#rapidEstReveal:not(.hidden)', { timeout: 60000 });
+    assert((await gradedTier(page)) === 'best', 'copying the live EVs exactly grades as a sharp estimate');
+    await page.waitForTimeout(2600); // well past the 1.6s this mode used to auto-advance on
+    assert(await page.locator('#rapidEstReveal:not(.hidden)').count() === 1,
+      'a sharp estimate keeps its reveal on screen instead of auto-advancing');
+    assert(await page.locator('#btnRapidNext').isVisible(),
+      'you advance from an estimate yourself, once you have finished reading it');
+
     await page.uncheck('#rapidAssist');
 
     // ---- locked NLH mode ----

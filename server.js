@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { URL } = require('url');
 const G = require('./lib/game.js');
 const P = require('./lib/poker.js');
+const Bot = require('./lib/bot.js');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -31,6 +32,55 @@ const MIME = {
  */
 const rooms = new Map();
 
+// The same pre-solved (hand, split) pool the browser's Practice Mode downloads. Bots
+// best-respond against opponents drawn from it, so a bot seat plays against (and as)
+// near-equilibrium strategy rather than something ad hoc. Loaded lazily and cached; a
+// missing file just means bots fall back to random opponents when sampling.
+let OPPONENT_POOL = null;
+function opponentPool() {
+  if (OPPONENT_POOL === null) {
+    try {
+      OPPONENT_POOL = JSON.parse(fs.readFileSync(path.join(PUBLIC_DIR, 'opponent-pool.json'), 'utf8'));
+    } catch (e) {
+      console.error('bot: could not load opponent-pool.json, bots will sample random opponents');
+      OPPONENT_POOL = [];
+    }
+  }
+  return OPPONENT_POOL;
+}
+
+const BOT_MIN_THINK_MS = 400; // bots shouldn't lock before you've even seen your cards
+const BOT_MAX_THINK_MS = 1300;
+
+function makePlayer({ name, isBot = false }) {
+  return {
+    id: crypto.randomUUID(),
+    // Bots get a real token they never hand out, and authPlayer refuses bot seats outright
+    // — otherwise a client could post as a bot's playerId with a null token and act as it.
+    token: crypto.randomUUID(),
+    name,
+    isBot,
+    sseRes: null,
+    connected: false,
+    hand: null,
+    assignment: null,
+    locked: false
+  };
+}
+
+function defaultBotName(room) {
+  const taken = new Set(room.players.map((p) => p.name.toLowerCase()));
+  for (let i = 1; i <= 8; i++) {
+    const name = i === 1 ? 'GTO Bot' : `GTO Bot ${i}`;
+    if (!taken.has(name.toLowerCase())) return name;
+  }
+  return 'GTO Bot';
+}
+
+function cleanDisplayName(raw, fallback) {
+  return String(raw || '').trim().slice(0, 20) || fallback;
+}
+
 function makeRoomCode() {
   let code;
   do {
@@ -40,7 +90,7 @@ function makeRoomCode() {
 }
 
 function publicPlayer(p) {
-  return { id: p.id, name: p.name, connected: p.connected, locked: p.locked };
+  return { id: p.id, name: p.name, connected: p.connected, locked: p.locked, isBot: !!p.isBot };
 }
 
 function publicRoomState(room) {
@@ -101,6 +151,43 @@ function dealNewHand(room) {
     sendTo(p, 'your_hand', { hand: p.hand, assignment: null });
   }
   broadcastState(room);
+  runBots(room);
+}
+
+// Every path that locks a hand funnels through here. The phase check matters: a bot
+// finishing and a human clicking Lock can both observe "everyone is locked", and without
+// it the hand would be scored twice.
+function maybeFinishHand(room) {
+  if (room.phase !== 'arranging') return;
+  if (!room.players.every((p) => p.locked)) return;
+  finishHand(room);
+}
+
+// Each bot solves its own hand off the main path (chunked inside lib/bot.js so the server
+// keeps serving everyone else mid-solve), then locks itself in. The handNumber/phase guard
+// stops a late solve from a previous hand clobbering the current one.
+function runBots(room) {
+  const handNumber = room.handNumber;
+  for (const bot of room.players.filter((p) => p.isBot)) {
+    const hand = bot.hand;
+    if (!hand) continue;
+    const think = BOT_MIN_THINK_MS + Math.random() * (BOT_MAX_THINK_MS - BOT_MIN_THINK_MS);
+    const started = Date.now();
+    Bot.chooseSplit(hand, opponentPool())
+      .catch(() => Bot.fallbackSplit(hand))
+      .then((assignment) => {
+        const wait = Math.max(0, think - (Date.now() - started));
+        setTimeout(() => {
+          if (rooms.get(room.code) !== room) return;
+          if (room.phase !== 'arranging' || room.handNumber !== handNumber || bot.locked) return;
+          if (G.validateAssignment(bot.hand, assignment)) assignment = Bot.fallbackSplit(bot.hand);
+          bot.assignment = assignment;
+          bot.locked = true;
+          broadcastState(room);
+          maybeFinishHand(room);
+        }, wait);
+      });
+  }
 }
 
 function finishHand(room) {
@@ -183,30 +270,36 @@ function authPlayer(body) {
   const room = rooms.get(String(body.code || '').toUpperCase());
   if (!room) return { error: 'Room not found.' };
   const player = room.players.find((p) => p.id === body.playerId && p.token === body.token);
-  if (!player) return { error: 'Not authorized for this room.' };
+  if (!player || player.isBot) return { error: 'Not authorized for this room.' };
   return { room, player };
 }
 
 const API_HANDLERS = {
   '/api/create_room': (body) => {
-    const cleanName = String(body.name || 'Host').trim().slice(0, 20) || 'Host';
+    const cleanName = cleanDisplayName(body.name, 'Host');
     const max = Math.min(4, Math.max(2, Number(body.maxPlayers) || 4));
-    const code = makeRoomCode();
-    const token = crypto.randomUUID();
-    const id = crypto.randomUUID();
+    const host = makePlayer({ name: cleanName });
     const room = {
-      code,
+      code: makeRoomCode(),
       maxPlayers: max,
       phase: 'lobby',
-      hostId: id,
-      players: [{ id, token, name: cleanName, sseRes: null, connected: false, hand: null, assignment: null, locked: false }],
+      hostId: host.id,
+      players: [host],
       boards: null,
       handNumber: 0,
-      cumulative: { [id]: 0 },
+      cumulative: { [host.id]: 0 },
       lastResults: null
     };
-    rooms.set(code, room);
-    return { ok: true, code, playerId: id, token };
+    // Bots requested at creation fill seats immediately, so a solo host can start a game
+    // without waiting for anyone. They're capped to leave at least the host's seat free.
+    const wanted = Math.max(0, Math.min(max - 1, Number(body.bots) || 0));
+    for (let i = 0; i < wanted; i++) {
+      const bot = makePlayer({ name: defaultBotName(room), isBot: true });
+      room.players.push(bot);
+      room.cumulative[bot.id] = 0;
+    }
+    rooms.set(room.code, room);
+    return { ok: true, code: room.code, playerId: host.id, token: host.token };
   },
 
   '/api/join_room': (body) => {
@@ -214,13 +307,11 @@ const API_HANDLERS = {
     if (!room) return { ok: false, error: 'Room not found.' };
     if (room.phase !== 'lobby') return { ok: false, error: 'That game has already started.' };
     if (room.players.length >= room.maxPlayers) return { ok: false, error: 'Room is full.' };
-    const cleanName = String(body.name || 'Player').trim().slice(0, 20) || 'Player';
-    const token = crypto.randomUUID();
-    const id = crypto.randomUUID();
-    room.players.push({ id, token, name: cleanName, sseRes: null, connected: false, hand: null, assignment: null, locked: false });
-    room.cumulative[id] = 0;
+    const player = makePlayer({ name: cleanDisplayName(body.name, 'Player') });
+    room.players.push(player);
+    room.cumulative[player.id] = 0;
     broadcastState(room);
-    return { ok: true, code: room.code, playerId: id, token };
+    return { ok: true, code: room.code, playerId: player.id, token: player.token };
   },
 
   '/api/start_game': (body) => {
@@ -242,8 +333,48 @@ const API_HANDLERS = {
     player.assignment = body.assignment;
     player.locked = true;
     broadcastState(room);
-    if (room.players.every((p) => p.locked)) finishHand(room);
+    maybeFinishHand(room);
     return { ok: true };
+  },
+
+  // ---- bot seats (host only) ----
+  // Bots can be added or removed in the lobby, and renamed at any time — renaming is
+  // cosmetic, so there's no reason to lock it to a phase.
+  '/api/add_bot': (body) => {
+    const { room, error, player } = authPlayer(body);
+    if (error) return { ok: false, error };
+    if (player.id !== room.hostId) return { ok: false, error: 'Only the host can add bots.' };
+    if (room.phase !== 'lobby') return { ok: false, error: 'Bots can only be added in the lobby.' };
+    if (room.players.length >= room.maxPlayers) return { ok: false, error: 'Table is full.' };
+    const bot = makePlayer({ name: cleanDisplayName(body.name, defaultBotName(room)), isBot: true });
+    room.players.push(bot);
+    room.cumulative[bot.id] = 0;
+    broadcastState(room);
+    return { ok: true, botId: bot.id };
+  },
+
+  '/api/remove_bot': (body) => {
+    const { room, error, player } = authPlayer(body);
+    if (error) return { ok: false, error };
+    if (player.id !== room.hostId) return { ok: false, error: 'Only the host can remove bots.' };
+    if (room.phase !== 'lobby') return { ok: false, error: 'Bots can only be removed in the lobby.' };
+    const idx = room.players.findIndex((p) => p.id === body.botId && p.isBot);
+    if (idx === -1) return { ok: false, error: 'No such bot.' };
+    const [bot] = room.players.splice(idx, 1);
+    delete room.cumulative[bot.id];
+    broadcastState(room);
+    return { ok: true };
+  },
+
+  '/api/rename_bot': (body) => {
+    const { room, error, player } = authPlayer(body);
+    if (error) return { ok: false, error };
+    if (player.id !== room.hostId) return { ok: false, error: 'Only the host can rename bots.' };
+    const bot = room.players.find((p) => p.id === body.botId && p.isBot);
+    if (!bot) return { ok: false, error: 'No such bot.' };
+    bot.name = cleanDisplayName(body.name, bot.name);
+    broadcastState(room);
+    return { ok: true, name: bot.name };
   },
 
   '/api/next_hand': (body) => {

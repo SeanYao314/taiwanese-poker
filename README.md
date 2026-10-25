@@ -38,18 +38,22 @@ Run the sanity test suite any time with:
 
 ```bash
 node tests/poker.test.js          # dependency-free: evaluator + scoring engine
+node tests/bot.test.js            # dependency-free: GTO bot split quality
+node tests/bots_api.test.js       # dependency-free: bot seats over real HTTP + SSE
 node tests/rapid_fire_ui.test.js  # drives Rapid Fire in real Chromium (needs playwright)
+node tests/lobby_bots_ui.test.js  # drives the lobby bot controls in Chromium (needs playwright)
 ```
 
-`poker.test.js` has no dependencies at all. `rapid_fire_ui.test.js` needs `playwright` with a
-Chromium available and starts/stops its own server; if playwright isn't installed it skips
-itself rather than failing.
+The first three have no dependencies at all (`bots_api.test.js` starts its own server and
+plays a full hand against bots over real HTTP). The two UI tests need `playwright` with a
+Chromium available and also start/stop their own server; if playwright isn't installed they
+skip themselves rather than failing.
 
 ## How the game works
 
-1. One player creates a room (picks a max player count, 2–4) and gets a 4-character room code plus a shareable link.
+1. One player creates a room (picks a max player count, 2–4, and optionally some GTO bots to fill seats) and gets a 4-character room code plus a shareable link.
 2. Others join with that code from the landing page's "Join Room" tab.
-3. Once at least 2 players have joined, the host clicks **Start Game** — everyone is privately dealt 7 cards.
+3. Once at least 2 seats are filled — humans, bots, or a mix — the host clicks **Start Game** and everyone is privately dealt 7 cards.
 4. Each player clicks a card to select it, then clicks the hand box to place it there (click a placed card to send it back). **Lock Hand** becomes available once every card is assigned.
 5. Once everyone has locked, both boards are revealed automatically along with every comparison, points for the hand (homerun scoring always included), and a running scoreboard.
 6. The host clicks **Deal Next Hand** to continue; cumulative scores persist for the room's session.
@@ -67,6 +71,35 @@ The sounds are synthesized in-browser with the Web Audio API (a couple of short 
 ### Sorting your cards
 
 Above "Your Cards," a small **Sort: Dealt / Rank / Suit** control lets you reorder the cards still in your hand — **Dealt** is the original deal order, **Rank** sorts high-to-low (ties broken by suit), and **Suit** groups cards by suit and then sorts high-to-low within each group. It's one shared, persisted preference (via `localStorage`) — pick a mode once and it applies everywhere this control appears: the live game's tray and Practice Mode's tray. It only reorders cards still waiting to be placed — cards you've already dropped into a 1/2/4-card slot keep whatever order you placed them in.
+
+## GTO bots
+
+Rooms can be filled with **GTO bot** seats, so you can start a game without waiting for
+anyone — pick how many on the Create Room form (they're capped to leave you a seat), then
+add, remove or rename them in the lobby. **Click a bot's name to rename it**; the name
+sticks for the session and follows the bot into the results and the scoreboard. Only the
+host manages bots, and only in the lobby (renaming works any time, since it's cosmetic).
+
+A bot can't just look its hand up: `public/opponent-pool.json` holds 5,400 specific hands,
+and a freshly dealt 7-card hand essentially never appears in it. So each bot **solves its
+own hand every deal** (`lib/bot.js`), scoring all 105 ways to split it against a sample of
+board runouts — where the opponents it samples are drawn from the solved pool, so it's
+best-responding to near-equilibrium play rather than to random splitting. Homerun scoring is
+included, since it's always on. On a modest machine that's roughly a second per bot per
+hand.
+
+That work is deliberately chunked, with a yield back to the event loop between batches. The
+server is a single-threaded Node process holding everyone's SSE streams, so a synchronous
+one-second solve would freeze the whole table every time a bot "thinks". Bots also wait a
+beat before locking, so they don't snap their hands in before you've finished reading your
+own cards.
+
+Two things worth knowing about how they play. A bot only knows its own seven cards — it
+samples hypothetical opponents from the pool rather than peeking at what anyone actually
+holds, so it isn't cheating with hidden information. And it's best-responding to the
+*equilibrium field*, which means against that field it hovers around break-even rather than
+printing money; `tests/bot.test.js` checks it beats a random split by a clear margin on
+boards it never solved against, which is the honest version of "is it actually solving?"
 
 ## Practice Mode (solo, no room needed)
 
@@ -162,8 +195,10 @@ by the EV it cost, chess-style:
 | **Mistake** / **Off** (`?`) | 0.75 – 2.0 | 2.0 – 4.0 |
 | **Blunder** / **Way off** (`??`) | > 2.0 | > 4.0 |
 
-A correct answer chimes and deals the next hand automatically; a miss waits, so you can study
-the better split before it disappears. The header tracks a **running average EV loss per
+A correct answer chimes. In Arrange and Locked NLH it then deals the next hand by itself,
+since there's nothing left to look at; a miss waits, so you can study the better split before
+it disappears. **Estimate EV never auto-advances** — its reveal is the whole lesson, so every
+hand waits for you to click Next (or press Enter) whether you nailed it or not. The header tracks a **running average EV loss per
 hand** — the number worth watching, since it's the rate you'd actually bleed chips at — plus
 how often you found the best, your streak, and a count of each tier. Stats are kept per drill,
 since "average EV lost" and "average estimate error" aren't the same measurement.
@@ -240,11 +275,15 @@ server.js               HTTP server: static file hosting + room/game API + SSE p
 lib/poker.js             5-card hand evaluator, deck/shuffle, hand-construction rules
                          (UMD-wrapped — also served directly to the browser for Practice Mode)
 lib/game.js              Dealing, assignment validation, scoring across all players
+lib/bot.js               GTO bot seats: solves its own 1/2/4 split each hand, chunked
 public/index.html        App shell (landing / lobby / arranging / results / practice screens)
 public/style.css         Styling
 public/client.js         Client logic: fetch() for actions, EventSource for live updates,
                          plus Practice Mode's client-side EV engine
 public/opponent-pool.json Pre-solved (hand, split) pairs powering Practice Mode + Rapid Fire
 tests/poker.test.js      Dependency-free sanity tests (run with `node tests/poker.test.js`)
+tests/bot.test.js        Dependency-free bot split-quality tests
+tests/bots_api.test.js   Dependency-free bot-seat tests over real HTTP + SSE
 tests/rapid_fire_ui.test.js  Rapid Fire end-to-end UI test (real Chromium via playwright)
+tests/lobby_bots_ui.test.js  Lobby bot controls UI test (real Chromium via playwright)
 ```

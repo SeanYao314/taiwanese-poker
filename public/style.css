@@ -861,3 +861,39 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   .rer-row { grid-template-columns: 1fr; gap: 2px; }
   .rapid-live-ev .rle-note { margin-left: 0; }
 }
+
+/* ---------- GTO bot seats ---------- */
+.player-list li.is-bot { background: #f3f7fb; }
+.lobby-tags { display: flex; align-items: center; gap: 6px; }
+.tag.bot-tag { background: #dce9f7; color: #22447d; }
+.bot-name-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 220px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: text;
+}
+.bot-name-input:hover { border-color: #d9dce1; background: #fff; }
+.bot-name-input:focus { border-color: var(--felt); background: #fff; outline: none; }
+.bot-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: .9rem;
+  font-weight: 800;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.bot-remove:hover { background: #fbe9e7; color: var(--danger); }
+.lobby-bot-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.lobby-bot-row button { padding: 8px 14px; font-size: .85rem; }
+.lobby-bot-row button:disabled { opacity: .5; cursor: not-allowed; }

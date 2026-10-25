@@ -236,7 +236,8 @@
   el('btnCreate').addEventListener('click', async () => {
     const name = el('createName').value.trim() || 'Host';
     const maxPlayers = Number(el('createMax').value);
-    const res = await api('/api/create_room', { name, maxPlayers });
+    const bots = Number(el('createBots').value) || 0;
+    const res = await api('/api/create_room', { name, maxPlayers, bots });
     if (!res.ok) return landingError(res.error);
     state.code = res.code; state.playerId = res.playerId; state.token = res.token; state.name = name;
     saveSession();
@@ -271,31 +272,111 @@
     navigator.clipboard?.writeText(el('shareLink').value).catch(() => {});
   });
 
+  el('btnAddBot').addEventListener('click', () => botAction('/api/add_bot', {}));
+
   el('btnStart').addEventListener('click', async () => {
     const res = await api('/api/start_game', { code: state.code, playerId: state.playerId, token: state.token });
     if (res && !res.ok) alert(res.error);
   });
 
+  function lobbyBotError(msg) {
+    const node = el('lobbyBotError');
+    node.textContent = msg;
+    node.classList.toggle('hidden', !msg);
+  }
+
+  async function botAction(pathname, extra) {
+    const res = await api(pathname, Object.assign({ code: state.code, playerId: state.playerId, token: state.token }, extra));
+    lobbyBotError(res && res.ok ? '' : (res && res.error) || 'Something went wrong.');
+    return res;
+  }
+
   function renderLobby(room) {
     el('lobbyCount').textContent = room.players.length;
     el('lobbyMax').textContent = room.maxPlayers;
+    const isHost = room.hostId === state.playerId;
+
+    // A room_state broadcast can land while the host is mid-rename, so remember which bot
+    // name field was focused (and the caret) and restore it after the rebuild — otherwise
+    // every keystroke would be yanked back to the server's copy of the name.
+    const active = document.activeElement;
+    const editingId = active && active.classList && active.classList.contains('bot-name-input')
+      ? active.dataset.botId : null;
+    const editingValue = editingId ? active.value : null;
+    const caret = editingId ? active.selectionStart : null;
+
     const list = el('lobbyPlayers');
     list.innerHTML = '';
     room.players.forEach((p) => {
       const li = document.createElement('li');
-      const label = document.createElement('span');
-      label.textContent = p.name + (p.id === state.playerId ? ' (you)' : '') + (!p.connected ? ' — offline' : '');
-      if (!p.connected) label.classList.add('offline');
-      li.appendChild(label);
+      li.className = p.isBot ? 'is-bot' : '';
+
+      if (p.isBot && isHost) {
+        const input = document.createElement('input');
+        input.className = 'bot-name-input';
+        input.dataset.botId = p.id;
+        input.value = p.name;
+        input.maxLength = 20;
+        input.setAttribute('aria-label', 'Bot name');
+        const commit = () => {
+          const name = input.value.trim();
+          if (!name || name === p.name) { input.value = p.name; return; }
+          botAction('/api/rename_bot', { botId: p.id, name });
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+          if (ev.key === 'Escape') { input.value = p.name; input.blur(); }
+        });
+        li.appendChild(input);
+      } else {
+        const label = document.createElement('span');
+        label.textContent = p.name + (p.id === state.playerId ? ' (you)' : '')
+          + (!p.isBot && !p.connected ? ' — offline' : '');
+        if (!p.isBot && !p.connected) label.classList.add('offline');
+        li.appendChild(label);
+      }
+
+      const tags = document.createElement('span');
+      tags.className = 'lobby-tags';
+      if (p.isBot) {
+        const bt = document.createElement('span');
+        bt.className = 'tag bot-tag';
+        bt.textContent = '🤖 GTO BOT';
+        tags.appendChild(bt);
+      }
       if (p.id === room.hostId) {
         const tag = document.createElement('span');
         tag.className = 'tag';
         tag.textContent = 'HOST';
-        li.appendChild(tag);
+        tags.appendChild(tag);
       }
+      if (p.isBot && isHost && room.phase === 'lobby') {
+        const rm = document.createElement('button');
+        rm.className = 'bot-remove';
+        rm.title = 'Remove this bot';
+        rm.textContent = '✕';
+        rm.addEventListener('click', () => botAction('/api/remove_bot', { botId: p.id }));
+        tags.appendChild(rm);
+      }
+      li.appendChild(tags);
       list.appendChild(li);
     });
-    const isHost = room.hostId === state.playerId;
+
+    if (editingId) {
+      const again = list.querySelector(`.bot-name-input[data-bot-id="${editingId}"]`);
+      if (again) {
+        again.value = editingValue;
+        again.focus();
+        try { again.setSelectionRange(caret, caret); } catch (e) { /* not supported, fine */ }
+      }
+    }
+
+    const canAddBot = isHost && room.phase === 'lobby' && room.players.length < room.maxPlayers;
+    el('lobbyBotRow').classList.toggle('hidden', !isHost || room.phase !== 'lobby');
+    el('btnAddBot').disabled = !canAddBot;
+    el('btnAddBot').textContent = canAddBot ? '+ Add GTO bot' : 'Table full';
+
     if (isHost && room.players.length >= 2) {
       show('btnStart');
       el('lobbyHint').textContent = '';
@@ -2365,7 +2446,11 @@
 
     renderRapidStats();
     renderRapidDrill();
-    if (correct && !rapid.retry) setTimeout(() => { if (rapid && rapid.view === 'drill' && !rapid.retry) rapidNext(); }, 1600);
+    // Estimate mode never auto-advances, even on a sharp read. Its reveal is the whole
+    // point of the drill -- per-hand estimate vs. actual, the homerun bonus broken out, the
+    // split's real value -- and that's worth reading rather than having it yanked away
+    // after a second. The other drills still advance themselves on a correct answer, where
+    // there's nothing to study.
   }
 
   async function rapidAnswerLocked(card) {

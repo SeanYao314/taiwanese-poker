@@ -42,6 +42,15 @@
             <option value="4" selected>4</option>
           </select>
         </label>
+        <label>GTO bots
+          <select id="createBots">
+            <option value="0" selected>None</option>
+            <option value="1">1 bot</option>
+            <option value="2">2 bots</option>
+            <option value="3">3 bots</option>
+          </select>
+          <span class="hint-inline">Bots take a seat and solve their own split every hand, best-responding to the same near-equilibrium pool Practice Mode uses. Add or rename them in the lobby. You can start a game against bots alone.</span>
+        </label>
         <button id="btnCreate" class="primary">Create Room</button>
       </div>
 
@@ -109,6 +118,11 @@
       </div>
       <h3>Players (<span id="lobbyCount"></span>/<span id="lobbyMax"></span>)</h3>
       <ul id="lobbyPlayers" class="player-list"></ul>
+      <div id="lobbyBotRow" class="lobby-bot-row hidden">
+        <button id="btnAddBot" class="secondary">+ Add GTO bot</button>
+        <span class="hint-inline">Bots solve their own split each hand. Click a bot's name to rename it.</span>
+      </div>
+      <p id="lobbyBotError" class="error hidden"></p>
       <button id="btnStart" class="primary hidden">Start Game</button>
       <p id="lobbyHint" class="hint"></p>
     </div>
