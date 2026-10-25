@@ -913,11 +913,11 @@
     if (qualifying.length >= trialCount) {
       chosen = shuffleArray(qualifying).slice(0, trialCount);
     } else {
-      // The pre-solved opponent pool only has ~1120 hands total, and roughly a third of
-      // those qualify (don't share a card with yours) for any given hand — comfortably
-      // enough for the default 150, but requesting close to the 1000 max will exceed the
-      // qualifying pool, so opponents start repeating (with fresh boards each trial).
-      // Still zero risk of a duplicate card within any single trial.
+      // The pre-solved opponent pool has ~5400 hands total, and roughly a third of those
+      // qualify (don't share a card with yours) for any given hand — about 1800 distinct
+      // opponents, so the default 150 boards and the ideal-split search's default 1000 both
+      // draw a fresh opponent every trial. Past ~1800 opponents start repeating (with fresh
+      // boards each trial). Still zero risk of a duplicate card within any single trial.
       chosen = [];
       for (let i = 0; i < trialCount; i++) {
         chosen.push(qualifying[Math.floor(Math.random() * qualifying.length)] || pool[i % pool.length]);

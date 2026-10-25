@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { fmtAssignment } = require('./common.js');
 
-const pool = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool.json'), 'utf8'));
+const pool = JSON.parse(fs.readFileSync(path.join(__dirname, 'pool400_hr.json'), 'utf8'));
 const rounds = [1, 2, 3, 4, 5].map((r) => JSON.parse(fs.readFileSync(path.join(__dirname, `round${r}_hr.json`), 'utf8')));
 
 console.log('=== Population-level convergence across HR rounds ===\n');
