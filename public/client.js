@@ -15,18 +15,13 @@
     es = new EventSource(`/api/stream?code=${encodeURIComponent(state.code)}&playerId=${encodeURIComponent(state.playerId)}&token=${encodeURIComponent(state.token)}`);
     es.addEventListener('room_state', (e) => handleRoomState(JSON.parse(e.data)));
     es.addEventListener('your_hand', (e) => handleYourHand(JSON.parse(e.data)));
-    es.addEventListener('flop', (e) => handleFlop(JSON.parse(e.data)));
     es.addEventListener('results', (e) => handleResults(JSON.parse(e.data)));
     return es;
   }
 
   const SUIT_SYMBOL = { s: '♠', h: '♥', d: '♦', c: '♣' };
   const SUIT_CLASS = { s: 'suit-s', h: 'suit-h', d: 'suit-d', c: 'suit-c' }; // 4-color deck: s=black h=red d=blue c=green
-  const CAPACITY = { one: 1, two: 2, four: 4 }; // final-hand shape — Practice Mode always uses this
-  // Homerun Pineapple's pre-flop capacity: everyone builds a 2/3/5 split first, then
-  // discards 1 from each hand after the flop to land back on CAPACITY above. Only the live
-  // game's arranging screen ever uses this — Practice Mode doesn't have a Pineapple mode.
-  const CAPACITY_PINEAPPLE_PRE = { one: 2, two: 3, four: 5 };
+  const CAPACITY = { one: 1, two: 2, four: 4 }; // final-hand shape
   const SLOT_TITLES = { one: '1-Card Hand', two: '2-Card Hand', four: '4-Card PLO Hand' };
   const STORAGE_KEY = 'taiwanese-poker-session';
 
@@ -34,9 +29,9 @@
   // A shared display preference (not per-hand state) for how "your cards" areas lay
   // themselves out: 'dealt' (whatever order the server sent, i.e. unsorted), 'rank'
   // (high to low, ties broken by suit), or 'suit' (grouped s/h/d/c, high to low within
-  // each suit). Applies to the live game's tray, Practice Mode's tray, and Homerun
-  // Pineapple's discard screen — anywhere you're looking at a raw pile of your own cards
-  // deciding what to do with them. Doesn't touch cards already placed into hand slots —
+  // each suit). Applies to the live game's tray and Practice Mode's tray — anywhere
+  // you're looking at a raw pile of your own cards deciding what to do with them.
+  // Doesn't touch cards already placed into hand slots —
   // those stay in the order you put them, since reordering a hand you've already built
   // would just be confusing. Persisted across visits like the sound preference.
   const CARD_SORT_KEY = 'taiwanese-poker-card-sort';
@@ -96,11 +91,7 @@
     myHand: null,
     assignment: { one: [], two: [], four: [] },
     selectedCard: null,
-    locked: false,
-    // ---- Homerun Pineapple discard round ----
-    flop: null, // { boardA: [3 cards], boardB: [3 cards] }
-    discardSelections: { one: null, two: null, four: null }, // one card marked per hand
-    discardLocked: false
+    locked: false
   };
   let revealInProgress = false;
 
@@ -237,22 +228,10 @@
     show('landingError');
   }
 
-  // Homerun scoring is forced on for Pineapple (it's part of what makes it that variant),
-  // so the standalone checkbox only makes sense for Standard rooms — hide it otherwise.
-  function updateVariantUI() {
-    const isPineapple = el('variantPineapple').checked;
-    if (isPineapple) hide('createHomerunRow'); else show('createHomerunRow');
-  }
-  document.querySelectorAll('input[name="variant"]').forEach((r) => r.addEventListener('change', updateVariantUI));
-  updateVariantUI();
-
   el('btnCreate').addEventListener('click', async () => {
     const name = el('createName').value.trim() || 'Host';
     const maxPlayers = Number(el('createMax').value);
-    const variant = el('variantPineapple').checked ? 'pineapple' : 'standard';
-    const homerunMode = el('createHomerun').checked;
-    const redRiver = el('createRedRiver').checked;
-    const res = await api('/api/create_room', { name, maxPlayers, variant, homerunMode, redRiver });
+    const res = await api('/api/create_room', { name, maxPlayers });
     if (!res.ok) return landingError(res.error);
     state.code = res.code; state.playerId = res.playerId; state.token = res.token; state.name = name;
     saveSession();
@@ -279,7 +258,7 @@
     el('lobbyCode').textContent = state.code;
     el('shareLink').value = `${location.origin}/?join=${state.code}`;
     ['landing', 'lobby'].forEach((s) => (s === 'lobby' ? show : hide)('screen-' + s));
-    hide('screen-game'); hide('screen-results'); hide('screen-discard');
+    hide('screen-game'); hide('screen-results');
   }
 
   el('btnCopyLink').addEventListener('click', () => {
@@ -295,17 +274,6 @@
   function renderLobby(room) {
     el('lobbyCount').textContent = room.players.length;
     el('lobbyMax').textContent = room.maxPlayers;
-    // Pineapple's badge already says "homerun scoring always on," so don't also show the
-    // plain homerun badge underneath it — that'd just be redundant.
-    if (room.variant === 'pineapple') {
-      show('lobbyPineappleBadge');
-      hide('lobbyHomerunBadge');
-    } else {
-      hide('lobbyPineappleBadge');
-      if (room.homerunMode) show('lobbyHomerunBadge'); else hide('lobbyHomerunBadge');
-    }
-    // Independent of variant — can show alongside either badge above.
-    if (room.redRiverMode) show('lobbyRedRiverBadge'); else hide('lobbyRedRiverBadge');
     const list = el('lobbyPlayers');
     list.innerHTML = '';
     room.players.forEach((p) => {
@@ -333,11 +301,8 @@
   }
 
   // ---------- arranging ----------
-  // Standard rooms arrange straight into the final CAPACITY (1/2/4). Pineapple rooms
-  // arrange into the bigger pre-flop CAPACITY_PINEAPPLE_PRE (2/3/5) here, then discard
-  // down to 1/2/4 on the separate discard screen once the flop is shown.
   function liveCapacity() {
-    return (state.room && state.room.variant === 'pineapple') ? CAPACITY_PINEAPPLE_PRE : CAPACITY;
+    return CAPACITY;
   }
 
   function handleYourHand({ hand, assignment }) {
@@ -345,11 +310,7 @@
     state.locked = !!assignment;
     state.assignment = assignment ? deepCopy(assignment) : { one: [], two: [], four: [] };
     state.selectedCard = null;
-    // Mid-hand reconnect during Pineapple's discard phase: the server resends this hand's
-    // data first, followed by a 'flop' event that actually switches to the discard screen
-    // — don't flip to the arranging screen in between.
-    if (state.room && state.room.phase === 'discarding') return;
-    hide('screen-lobby'); hide('screen-results'); hide('screen-discard');
+    hide('screen-lobby'); hide('screen-results');
     show('screen-game');
     renderGame();
   }
@@ -363,16 +324,12 @@
 
   function renderGame() {
     el('handNumber').textContent = state.room ? state.room.handNumber : '';
-    const isPineapple = state.room && state.room.variant === 'pineapple';
-    if (state.room && state.room.homerunMode && !isPineapple) show('gameHomerunTag'); else hide('gameHomerunTag');
-    if (isPineapple) show('gamePineappleTag'); else hide('gamePineappleTag');
-    if (state.room && state.room.redRiverMode) show('gameRedRiverTag'); else hide('gameRedRiverTag');
 
-    const cap = liveCapacity();
-    el('slotTitleOne').textContent = isPineapple ? `${cap.one}-Card Hand (discard 1 after the flop)` : '1-Card Hand';
-    el('slotTitleTwo').textContent = isPineapple ? `${cap.two}-Card Hand (discard 1 after the flop)` : '2-Card Hand';
-    el('slotTitleFour').textContent = isPineapple ? `${cap.four}-Card PLO Hand (discard 1 after the flop)` : '4-Card PLO Hand';
+    el('slotTitleOne').textContent = '1-Card Hand';
+    el('slotTitleTwo').textContent = '2-Card Hand';
+    el('slotTitleFour').textContent = '4-Card PLO Hand';
 
+    const cap = CAPACITY;
     const disabled = state.locked;
     ['one', 'two', 'four'].forEach((slot) => {
       const container = el('slot' + capitalize(slot));
@@ -395,9 +352,7 @@
     if (disabled) {
       const msg = document.createElement('div');
       msg.className = 'hint';
-      msg.textContent = isPineapple
-        ? 'Hand locked — waiting for other players before the flop…'
-        : 'Hand locked — waiting for other players…';
+      msg.textContent = 'Hand locked — waiting for other players…';
       tray.appendChild(msg);
     } else {
       trayCards().forEach((c) => {
@@ -443,9 +398,8 @@
 
   // ⌘/Ctrl+click a tray card to skip the select-then-click-a-slot dance — drops it
   // straight into the first slot (left to right: 1-card, 2-card, 4-card) that still has
-  // room. No-ops if every slot is already full. Shared by the live game (standard or
-  // Pineapple pre-flop, via its own capacity) and Practice Mode (always the plain
-  // CAPACITY default), each with their own separate assignment object.
+  // room. No-ops if every slot is already full. Shared by the live game and Practice
+  // Mode, each with their own separate assignment object.
   function placeInFirstOpenSlot(assignment, card, capacity = CAPACITY) {
     for (const slot of ['one', 'two', 'four']) {
       if (assignment[slot].length < capacity[slot]) {
@@ -480,95 +434,6 @@
     el('lockStatus').textContent = `${lockedCount}/${state.room.players.length} locked`;
   }
 
-  // ---------- discard round (Homerun Pineapple only) ----------
-  // Everyone's pre-flop 2/3/5 split is already sitting in state.assignment (set back when
-  // they clicked "Lock Hand" on the arranging screen) — the flop event doesn't need to
-  // resend it for the normal, still-connected case. It only gets resent by the server for
-  // a mid-discard reconnect (see handleYourHand above).
-  function handleFlop(flop) {
-    state.flop = flop;
-    const me = state.room && state.room.players.find((p) => p.id === state.playerId);
-    state.discardLocked = !!(me && me.locked);
-    if (!state.discardLocked) state.discardSelections = { one: null, two: null, four: null };
-    hide('screen-lobby'); hide('screen-game'); hide('screen-results');
-    show('screen-discard');
-    renderDiscardScreen();
-  }
-
-  function renderDiscardBoards(flop) {
-    const row = el('discardBoardsRow');
-    row.innerHTML = '';
-    [['Board A (flop)', flop.boardA], ['Board B (flop)', flop.boardB]].forEach(([label, cards]) => {
-      const block = document.createElement('div');
-      block.className = 'board-block';
-      const h = document.createElement('h4');
-      h.textContent = label;
-      block.appendChild(h);
-      block.appendChild(cardRow(cards));
-      row.appendChild(block);
-    });
-  }
-
-  function renderDiscardScreen() {
-    el('discardHandNumber').textContent = state.room ? state.room.handNumber : '';
-    if (state.room && state.room.redRiverMode) show('discardRedRiverTag'); else hide('discardRedRiverTag');
-    renderDiscardBoards(state.flop);
-
-    const waiting = state.discardLocked;
-    hide('discardError');
-
-    ['one', 'two', 'four'].forEach((cat) => {
-      const container = el('discardSlot' + capitalize(cat));
-      container.innerHTML = '';
-      sortCards(state.assignment[cat], cardSortMode).forEach((c) => {
-        const cardNode = cardEl(c);
-        if (state.discardSelections[cat] === c) cardNode.classList.add('marked-discard');
-        if (!waiting) {
-          cardNode.addEventListener('click', () => {
-            state.discardSelections[cat] = state.discardSelections[cat] === c ? null : c;
-            renderDiscardScreen();
-          });
-        }
-        container.appendChild(cardNode);
-      });
-    });
-
-    if (waiting) {
-      show('discardWaitingHint');
-    } else {
-      hide('discardWaitingHint');
-    }
-
-    const allMarked = ['one', 'two', 'four'].every((cat) => state.discardSelections[cat]);
-    el('btnDiscardConfirm').disabled = waiting || !allMarked;
-    el('btnDiscardConfirm').textContent = waiting ? 'Discarded' : 'Discard & Continue';
-
-    updateDiscardLockStatus();
-  }
-
-  function updateDiscardLockStatus() {
-    if (!state.room) return;
-    const lockedCount = state.room.players.filter((p) => p.locked).length;
-    el('discardLockStatus').textContent = `${lockedCount}/${state.room.players.length} discarded`;
-  }
-
-  el('btnDiscardConfirm').addEventListener('click', async () => {
-    const res = await api('/api/discard', {
-      code: state.code,
-      playerId: state.playerId,
-      token: state.token,
-      discards: state.discardSelections
-    });
-    if (!res.ok) {
-      el('discardError').textContent = res.error;
-      show('discardError');
-      return;
-    }
-    hide('discardError');
-    state.discardLocked = true;
-    renderDiscardScreen();
-  });
-
   // ---------- results ----------
   // The full results payload arrives from the server all at once (nothing is hidden),
   // but we reveal it to the player as a staged, timed "sweat" sequence: hole cards are
@@ -582,7 +447,7 @@
 
   function handleResults(results) {
     state.lastResults = results;
-    hide('screen-game'); hide('screen-lobby'); hide('screen-discard');
+    hide('screen-game'); hide('screen-lobby');
     show('screen-results');
     startResultsReveal(results);
   }
@@ -648,21 +513,15 @@
     // Stages 1-3, run once per board: reveal that board's cards, reveal what everyone
     // made on it, then step through that board's comparisons live with point swings
     // posted on the spot.
-    function queueBoardStages(boardIdx, baseLabel) {
+    function queueBoardStages(boardIdx, label) {
       const comparisonsForBoard = r.comparisons.filter((c) => c.boardIndex === boardIdx);
-      // Red River: a board can come in longer than the base 5 cards — flag it right in
-      // the board's own label so it's obvious why there are extra cards to watch land.
-      const oceanCount = Math.max(0, r.boards[boardIdx].length - 5);
-      const label = oceanCount > 0
-        ? `${baseLabel} — 🌊 Red River! +${oceanCount} ocean card${oceanCount === 1 ? '' : 's'}`
-        : baseLabel;
 
       queue.push({
         delay: 500,
-        run: () => { el('revealStatus').textContent = `Revealing ${baseLabel}…`; ensureBoardBlock(boardIdx, label); }
+        run: () => { el('revealStatus').textContent = `Revealing ${label}…`; ensureBoardBlock(boardIdx, label); }
       });
-      r.boards[boardIdx].forEach((c, cardIdx) => {
-        queue.push({ delay: 220, run: () => appendBoardCard(boardIdx, c, cardIdx) });
+      r.boards[boardIdx].forEach((c) => {
+        queue.push({ delay: 220, run: () => appendBoardCard(boardIdx, c) });
       });
 
       queue.push({ delay: 400, run: () => { el('revealStatus').textContent = `What's everyone making on ${label}?`; } });
@@ -708,7 +567,7 @@
     }
 
     // Final flourish — homerun banner (if any), then the finished scoreboard.
-    const hasHomerun = !!(r.homerunMode && r.homeruns && r.homeruns.length > 0);
+    const hasHomerun = !!(r.homeruns && r.homeruns.length > 0);
     queue.push({ delay: 500, run: () => { if (hasHomerun) showHomerunBanner(r, nameById); } });
     queue.push({ delay: hasHomerun ? 900 : 200, run: () => finishReveal(r) });
 
@@ -728,13 +587,10 @@
     el('boardsRow').appendChild(block);
   }
 
-  function appendBoardCard(boardIdx, card, cardIdx) {
+  function appendBoardCard(boardIdx, card) {
     const cardsDiv = el('boardCards' + boardIdx);
     const node = cardEl(card);
     node.classList.add('card-reveal');
-    // Red River: anything past index 4 (the base river) only exists because of the
-    // modifier — ring it so it reads as "ocean card" at a glance.
-    if (typeof cardIdx === 'number' && cardIdx >= 5) node.classList.add('ocean-card');
     cardsDiv.appendChild(node);
   }
 
@@ -919,7 +775,7 @@
     // A homerun already got its own bigger fanfare (via showHomerunBanner, timed to the
     // banner appearing) — don't also play the plain win chime on top of that for the same
     // hand. Otherwise, a positive net score this hand gets the regular "you won" cue.
-    const wonHomerun = !!(r.homerunMode && r.homeruns && r.homeruns.some((h) => h.winner === state.playerId));
+    const wonHomerun = !!(r.homeruns && r.homeruns.some((h) => h.winner === state.playerId));
     if (!wonHomerun && (r.pointsThisHand[state.playerId] || 0) > 0) playWinSound();
 
     const isHost = state.room && state.room.hostId === state.playerId;
@@ -938,13 +794,9 @@
 
     const cellPoints = {};
     [0, 1].forEach((boardIdx) => {
-      const baseLabel = boardIdx === 0 ? 'Board A' : 'Board B';
-      const oceanCount = Math.max(0, r.boards[boardIdx].length - 5);
-      const label = oceanCount > 0
-        ? `${baseLabel} — 🌊 Red River! +${oceanCount} ocean card${oceanCount === 1 ? '' : 's'}`
-        : baseLabel;
+      const label = boardIdx === 0 ? 'Board A' : 'Board B';
       ensureBoardBlock(boardIdx, label);
-      r.boards[boardIdx].forEach((c, cardIdx) => appendBoardCard(boardIdx, c, cardIdx));
+      r.boards[boardIdx].forEach((c) => appendBoardCard(boardIdx, c));
       r.players.forEach((p) => {
         ['one', 'two', 'four'].forEach((cat) => revealPlayerBoardHand(r, p, cat, boardIdx));
       });
@@ -958,7 +810,7 @@
       });
     });
 
-    const hasHomerun = !!(r.homerunMode && r.homeruns && r.homeruns.length > 0);
+    const hasHomerun = !!(r.homeruns && r.homeruns.length > 0);
     if (hasHomerun) showHomerunBanner(r, nameById); else hide('homerunBanner');
 
     finishReveal(r);
@@ -1027,31 +879,9 @@
   const PRACTICE_IDEAL_TRIALS_DEFAULT = 1000;
   let practiceIdealTrialTarget = PRACTICE_IDEAL_TRIALS_DEFAULT;
 
-  // Unlike the trial count, this applies instantly (it's just a different lens on the
-  // same trial data, not a re-deal) and persists as a sticky setting across New Hand
-  // clicks until the user changes it.
-  let practiceHomerunMode = false;
-
-  // Red River modifier (see lib/game.js for the live-game version of the same rule):
-  // unlike homerunMode, this changes the actual cards on every trial's boards, so it
-  // can't be re-applied instantly to already-generated trials — like practiceTrialTarget,
-  // it's a sticky setting that only takes effect starting with the next New Hand.
-  let practiceRedRiverMode = false;
-
-  // Pure, same cascade rule as lib/game.js's applyRedRiverRule: keep appending cards from
-  // `pool` (in order) onto `board` while the most recently added card is red, stopping the
-  // moment a black one lands (or the pool runs out). Duplicated here in just a few lines
-  // rather than served from lib/game.js, matching how this file already duplicates the
-  // rest of the dealing/scoring logic it needs client-side (see buildPracticeTrials).
-  function applyRedRiverRule(board, pool) {
-    const extended = board.slice();
-    let used = 0;
-    while (extended.length > 0 && window.Poker.isRed(extended[extended.length - 1]) && used < pool.length) {
-      extended.push(pool[used]);
-      used += 1;
-    }
-    return { board: extended, used };
-  }
+  // Homerun scoring is always part of the game now, so Practice Mode's EV calculations
+  // and the ideal-split search always factor it in too — there's no toggle for it.
+  const practiceHomerunMode = true;
   const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
   let opponentPool = null; // cached after first fetch
   let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
@@ -1072,7 +902,7 @@
     return a;
   }
 
-  function buildPracticeTrials(playerHand, pool, trialCount, redRiver) {
+  function buildPracticeTrials(playerHand, pool, trialCount) {
     const playerSet = new Set(playerHand);
     const qualifying = pool.filter((entry) => {
       const oppHand = [...entry.one, ...entry.two, ...entry.four];
@@ -1098,18 +928,8 @@
       const oppHand = [...entry.one, ...entry.two, ...entry.four];
       const oppSet = new Set([...playerHand, ...oppHand]);
       const remaining = shuffleArray(window.Poker.freshDeck().filter((c) => !oppSet.has(c)));
-      let boardA = remaining.slice(0, 5);
-      let boardB = remaining.slice(5, 10);
-      if (redRiver) {
-        // Same ordering as lib/game.js's dealHand: extend board A fully from whatever's
-        // left in the deck, then board B from whatever's left after that.
-        let idx = 10;
-        const extA = applyRedRiverRule(boardA, remaining.slice(idx));
-        boardA = extA.board;
-        idx += extA.used;
-        const extB = applyRedRiverRule(boardB, remaining.slice(idx));
-        boardB = extB.board;
-      }
+      const boardA = remaining.slice(0, 5);
+      const boardB = remaining.slice(5, 10);
       return { oppSplit: entry, boardA, boardB };
     });
   }
@@ -1123,7 +943,7 @@
 
     const pool = await loadOpponentPool();
     const hand = window.Poker.shuffle(window.Poker.freshDeck()).slice(0, 7);
-    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget, practiceRedRiverMode);
+    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget);
 
     practice = {
       hand,
@@ -1332,7 +1152,7 @@
     });
 
     const hrLine = el('practiceHomerunRate');
-    if (practiceHomerunMode && n) {
+    if (n) {
       hrLine.innerHTML = `⚾ Homerun rate: you swept <span class="pcell pos">${homerunWins}/${n}</span> boards &middot; opponent swept <span class="pcell neg">${homerunLosses}/${n}</span> boards`;
       hrLine.classList.remove('hidden');
     } else {
@@ -1787,47 +1607,6 @@
     });
   }
 
-  // Red River: sticky like the trial-count slider, not instant like homerun mode below —
-  // it changes what's actually on each trial's boards, so there's nothing to re-score
-  // until the next New Hand regenerates them.
-  const redRiverToggleEl = el('practiceRedRiverToggle');
-  if (redRiverToggleEl) {
-    redRiverToggleEl.addEventListener('change', () => {
-      practiceRedRiverMode = redRiverToggleEl.checked;
-    });
-  }
-
-  el('practiceHomerunToggle').addEventListener('change', () => {
-    practiceHomerunMode = el('practiceHomerunToggle').checked;
-    if (!practice) return;
-
-    // The "ideal" split can differ under homerun scoring (it's a different objective —
-    // see findIdealSplitAsync), so any cached answer is stale. Don't auto-recompute
-    // (that's the slow multi-second operation); just clear it and let the user re-ask.
-    practice.ideal = null;
-    el('practiceIdealPanel').classList.add('hidden');
-    const idealBtn = el('btnPracticeIdeal');
-    idealBtn.disabled = false;
-    idealBtn.textContent = 'Show Ideal Split';
-
-    // Re-score is cheap (same trial data, just a different scoring lens), so this can
-    // safely happen instantly for both the live arrangement and everything saved so far.
-    const complete = practiceTrayCards().length === 0
-      && practice.assignment.one.length === 1
-      && practice.assignment.two.length === 2
-      && practice.assignment.four.length === 4;
-    if (complete) runPracticeEval();
-
-    practice.saved.forEach((s) => {
-      const r = evalAssignmentAcrossTrials(s.assignment, practice.trials, practiceHomerunMode);
-      s.avgTotal = r.avgTotal;
-      s.avgCells = r.avgCells;
-      s.homerunWins = r.homerunWins;
-      s.homerunLosses = r.homerunLosses;
-    });
-    renderPracticeSaved();
-  });
-
   // ---------- shared room state ----------
   function handleRoomState(room) {
     state.room = room;
@@ -1836,8 +1615,6 @@
       renderLobby(room);
     } else if (room.phase === 'arranging') {
       updateLockStatus();
-    } else if (room.phase === 'discarding') {
-      updateDiscardLockStatus();
     } else if (room.phase === 'results') {
       if (revealInProgress) return; // don't let a late room_state event show the button mid-reveal
       const isHost = room.hostId === state.playerId;
@@ -1846,13 +1623,12 @@
   }
 
   // Wire up every "Sort: Dealt / Rank / Suit" control on the page. Each one re-renders
-  // only its own screen — renderGame/renderPracticeArranger/renderDiscardScreen are each
-  // guarded internally against running before that screen has real state to show, and
-  // since a hidden screen's buttons can't be clicked (`.hidden` is display:none), the
-  // right one always fires.
+  // only its own screen — renderGame/renderPracticeArranger are each guarded internally
+  // against running before that screen has real state to show, and since a hidden
+  // screen's buttons can't be clicked (`.hidden` is display:none), the right one always
+  // fires.
   wireSortControl('gameSortControl', renderGame);
   wireSortControl('practiceSortControl', renderPracticeArranger);
-  wireSortControl('discardSortControl', renderDiscardScreen);
 
   // ---------- boot / rejoin ----------
   const params = new URLSearchParams(location.search);

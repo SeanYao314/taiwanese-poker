@@ -132,36 +132,6 @@ h3 { margin: 22px 0 10px; font-size: 1.05rem; }
   margin-top: 2px;
 }
 
-.variant-select { margin-bottom: 14px; }
-.variant-select > label { margin-bottom: 8px; }
-.variant-options { display: flex; flex-direction: column; gap: 10px; }
-.radio-label {
-  display: flex !important;
-  flex-direction: row;
-  align-items: flex-start;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 600;
-  font-size: .9rem;
-  color: var(--ink);
-  border: 1px solid #d9dce1;
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-.radio-label:has(input:checked) { border-color: var(--felt); background: #f6f9f7; }
-.radio-label input[type="radio"] { width: auto; margin-top: 3px; flex: 0 0 auto; }
-.radio-label .hint-inline { display: block; font-weight: 500; color: var(--muted); margin-top: 2px; }
-
-.homerun-mode-badge {
-  background: #fff4d6;
-  color: #7a5b00;
-  border: 1px solid #f0d488;
-  border-radius: 10px;
-  padding: 8px 12px;
-  font-weight: 700;
-  margin-bottom: 16px;
-}
-
 .homerun-banner {
   background: linear-gradient(90deg, #ffe9a8, #fff4d6);
   border: 1px solid #f0d488;
@@ -183,11 +153,6 @@ h3 { margin: 22px 0 10px; font-size: 1.05rem; }
   margin-left: 8px;
   vertical-align: middle;
 }
-.homerun-tag.pineapple-tag { background: #ffd76e; }
-.homerun-mode-badge.pineapple-badge { background: #fff0d0; border-color: #f5c86a; }
-.homerun-tag.redriver-tag { background: #9fd3ff; color: #0a3a66; }
-.homerun-mode-badge.redriver-badge { background: #eaf5ff; color: #0a3a66; border-color: #9fd3ff; }
-
 button.primary {
   background: var(--felt);
   color: #fff;
@@ -300,7 +265,6 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 }
 .sort-btn:hover { filter: brightness(0.96); }
 .sort-btn.active { background: var(--felt); color: #fff; }
-#discardSortControl { display: flex; margin-bottom: 12px; }
 .tray {
   display: flex;
   flex-wrap: wrap;
@@ -338,21 +302,6 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .playing-card.suit-c { color: var(--suit-club); }
 .playing-card .suit { font-size: .85em; }
 .playing-card.used-in-best { box-shadow: 0 0 0 2px var(--felt) inset, 0 2px 4px rgba(0,0,0,.15); }
-.playing-card.marked-discard { outline: 3px solid var(--danger); opacity: .55; position: relative; }
-.playing-card.marked-discard::after {
-  content: "discard";
-  position: absolute;
-  bottom: -2px;
-  left: 0;
-  right: 0;
-  text-align: center;
-  font-size: .55rem;
-  font-weight: 800;
-  letter-spacing: .5px;
-  text-transform: uppercase;
-  color: var(--danger);
-  background: rgba(255,255,255,.9);
-}
 
 .actions { display: flex; gap: 10px; }
 .actions .secondary { flex: 0 0 auto; }
@@ -361,10 +310,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 .boards-row { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 24px; }
 .board-block { flex: 1; min-width: 260px; }
 .board-block h4 { margin: 0 0 8px; }
-.board-cards { display: flex; gap: 6px; flex-wrap: wrap; }
-/* Red River "ocean" cards (anything past the base 5) get a subtle blue ring so it's
-   obvious at a glance which cards only exist because the river came up red. */
-.playing-card.ocean-card { box-shadow: 0 0 0 2px var(--suit-diamond) inset, 0 2px 4px rgba(0,0,0,.15); }
+.board-cards { display: flex; gap: 6px; }
 
 .player-result {
   border: 1px solid #e5e7eb;
@@ -431,8 +377,6 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   0% { transform: scale(1.5); }
   100% { transform: scale(1); }
 }
-
-.practice-homerun-toggle { margin-bottom: 18px; }
 
 .practice-homerun-rate {
   margin: 12px 0 0;
