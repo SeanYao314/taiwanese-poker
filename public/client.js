@@ -516,8 +516,44 @@
 
   function updateLockStatus() {
     if (!state.room) return;
-    const lockedCount = state.room.players.filter((p) => p.locked).length;
-    el('lockStatus').textContent = `${lockedCount}/${state.room.players.length} locked`;
+    const players = state.room.players;
+    const lockedCount = players.filter((p) => p.locked).length;
+    el('lockStatus').textContent = `${lockedCount}/${players.length} locked`;
+
+    // Who the table is actually waiting on. Without this a bot solving its hand looks
+    // identical to a human who wandered off, which is exactly the moment the game feels
+    // like it has hung.
+    const strip = el('seatStatus');
+    strip.innerHTML = '';
+    players.forEach((p) => {
+      const chip = document.createElement('span');
+      const thinking = !!p.thinking && !p.locked;
+      chip.className = 'seat-chip' + (p.locked ? ' locked' : thinking ? ' thinking' : '');
+
+      const name = document.createElement('span');
+      name.className = 'seat-name';
+      name.textContent = p.name + (p.id === state.playerId ? ' (you)' : '');
+      chip.appendChild(name);
+
+      const status = document.createElement('span');
+      status.className = 'seat-state';
+      if (p.locked) {
+        status.textContent = '✓';
+      } else if (thinking) {
+        const dots = document.createElement('span');
+        dots.className = 'seat-dots';
+        dots.innerHTML = '<i></i><i></i><i></i>';
+        status.appendChild(dots);
+        const word = document.createElement('span');
+        word.className = 'seat-word';
+        word.textContent = 'thinking';
+        status.appendChild(word);
+      } else {
+        status.textContent = p.isBot ? 'waiting' : (p.connected ? 'arranging…' : 'offline');
+      }
+      chip.appendChild(status);
+      strip.appendChild(chip);
+    });
   }
 
   // ---------- results ----------
@@ -927,7 +963,7 @@
   // comparable (no fresh variance each redo).
   const PRACTICE_TRIALS_MIN = 100;
   const PRACTICE_TRIALS_MAX = 10000;
-  const PRACTICE_TRIALS_DEFAULT = 150;
+  const PRACTICE_TRIALS_DEFAULT = 500;
   let practiceTrialTarget = PRACTICE_TRIALS_DEFAULT; // takes effect on the next dealt hand
 
   // The board-count slider is logarithmic (100 to 10,000 spans two orders of magnitude —
@@ -962,7 +998,7 @@
   // stay fast, but they can dial it up if they want a slower, more precise search. It's
   // sticky (unlike the EV slider, it applies immediately, not just on New Hand) and gets
   // clamped down to however many boards this hand actually has if set higher than that.
-  const PRACTICE_IDEAL_TRIALS_DEFAULT = 1000;
+  const PRACTICE_IDEAL_TRIALS_DEFAULT = 2000;
   let practiceIdealTrialTarget = PRACTICE_IDEAL_TRIALS_DEFAULT;
 
   // Homerun scoring is always part of the game now, so Practice Mode's EV calculations
@@ -1028,11 +1064,18 @@
     el('pTray').innerHTML = '<div class="hint">Loading opponent pool…</div>';
 
     const pool = await loadOpponentPool();
-    const hand = window.Poker.shuffle(window.Poker.freshDeck()).slice(0, 7);
+    renderHandFilterCount();
+    // Explore deals from the pool too (not a raw shuffle) so the hand filter applies here
+    // as well, and so the hand's own solved EV is known. Pool hands are themselves random
+    // 7-card hands, so with no filter this is the same distribution as before.
+    const usable = filteredPool(pool);
+    const seed = usable[Math.floor(Math.random() * usable.length)];
+    const hand = [...seed.one, ...seed.two, ...seed.four];
     const trials = buildPracticeTrials(hand, pool, practiceTrialTarget);
 
     practice = {
       hand,
+      solvedEv: typeof seed.ev === 'number' ? seed.ev : null,
       trials,
       assignment: { one: [], two: [], four: [] },
       selectedCard: null,
@@ -1045,6 +1088,7 @@
     idealBtn.textContent = 'Show Ideal Split';
     renderPracticeArranger();
     renderPracticeSaved();
+    renderPracticeSolvedEv();
   }
 
   function practiceTrayCards() {
@@ -1164,14 +1208,22 @@
   // and standard deviation of the outcome (how swingy this split's results are trial to
   // trial), plus the standard error of the EV estimate itself — i.e. roughly how far off
   // "avgTotal" might be from the true long-run EV, given only `n` trials.
-  function evalAssignmentAcrossTrials(assignment, trials, homerunMode) {
+  function evalAssignmentAcrossTrials(assignment, trials, homerunMode, opts) {
     let sumTotal = 0;
     let sumTotalSq = 0;
+    // Optionally keep each trial's own result. Two splits scored on the SAME boards are a
+    // paired sample, and the spread of their per-board differences is far smaller than
+    // either split's own spread — so this is what makes "is A really better than B?"
+    // answerable, rather than comparing two noisy averages.
+    const perTrial = opts && opts.keepPerTrial ? new Float64Array(trials.length) : null;
+    let ti = 0;
     const sumCells = { one: [0, 0], two: [0, 0], four: [0, 0] };
     let homerunWins = 0;
     let homerunLosses = 0;
     trials.forEach((trial) => {
       const r = scoreTrial(assignment, trial, homerunMode);
+      if (perTrial) perTrial[ti] = r.total;
+      ti++;
       sumTotal += r.total;
       sumTotalSq += r.total * r.total;
       ['one', 'two', 'four'].forEach((cat) => {
@@ -1191,15 +1243,25 @@
     const varianceTotal = n > 1 ? Math.max(0, (sumTotalSq - n * avgTotal * avgTotal) / (n - 1)) : 0;
     const sdTotal = Math.sqrt(varianceTotal);
     const seTotal = n > 0 ? sdTotal / Math.sqrt(n) : 0;
-    return { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal, seTotal };
+    return { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal, seTotal, perTrial };
   }
 
   function fmtEv(n) { return (n > 0 ? '+' : '') + n.toFixed(2); }
 
   function runPracticeEval() {
-    const result = evalAssignmentAcrossTrials(practice.assignment, practice.trials, practiceHomerunMode);
+    const result = evalAssignmentAcrossTrials(practice.assignment, practice.trials, practiceHomerunMode, { keepPerTrial: true });
     practice.lastEv = result;
     renderPracticeEV(result);
+  }
+
+  function renderPracticeSolvedEv() {
+    const node = el('practiceSolvedEv');
+    if (!node) return;
+    if (!practice || practice.solvedEv === null) { node.classList.add('hidden'); return; }
+    const ev = practice.solvedEv;
+    node.innerHTML = `This hand's solved value: <strong class="${ev > 0 ? 'pos' : ev < 0 ? 'neg' : ''}">${fmtEv(ev)}</strong> pts/hand `
+      + `<span class="hint-inline">— what the solver's own split for these cards is worth against the field</span>`;
+    node.classList.remove('hidden');
   }
 
   function renderPracticeEV(result) {
@@ -1573,13 +1635,36 @@
       key,
       assignment: deepCopy(practice.assignment),
       avgTotal: practice.lastEv.avgTotal,
-      avgCells: practice.lastEv.avgCells
+      avgCells: practice.lastEv.avgCells,
+      perTrial: practice.lastEv.perTrial
     });
     renderPracticeSaved();
   });
 
   function fmtAssignmentKey(a) {
     return ['one', 'two', 'four'].map((c) => c + ':' + [...a[c]].sort().join(',')).join('|');
+  }
+
+  // Paired comparison of two splits scored on the same boards. Because the boards are
+  // shared, most of the variance cancels: what matters is the spread of the per-board
+  // DIFFERENCE, not each split's own spread. Returns the mean gap and its standard error,
+  // plus whether the gap clears two standard errors (~95%) — i.e. whether the boards you
+  // ran can actually tell these two splits apart.
+  function pairedComparison(a, b) {
+    if (!a || !b || !a.perTrial || !b.perTrial) return null;
+    const n = Math.min(a.perTrial.length, b.perTrial.length);
+    if (n < 2) return null;
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += a.perTrial[i] - b.perTrial[i];
+    const mean = sum / n;
+    let sq = 0;
+    for (let i = 0; i < n; i++) {
+      const d = (a.perTrial[i] - b.perTrial[i]) - mean;
+      sq += d * d;
+    }
+    const sd = Math.sqrt(sq / (n - 1));
+    const se = sd / Math.sqrt(n);
+    return { mean, se, n, separated: Math.abs(mean) > 2 * se };
   }
 
   function renderPracticeSaved() {
@@ -1621,6 +1706,22 @@
       ev.textContent = fmtEv(s.avgTotal) + ' EV';
       item.appendChild(ev);
 
+      // How this split compares with the current leader, on the boards you actually ran.
+      if (i > 0) {
+        const cmp = pairedComparison(sorted[0], s);
+        if (cmp) {
+          const gap = document.createElement('div');
+          gap.className = 'psi-gap' + (cmp.separated ? '' : ' tossup');
+          gap.textContent = cmp.separated
+            ? `#1 by ${cmp.mean.toFixed(2)} ± ${cmp.se.toFixed(2)}`
+            : `too close to call (${cmp.mean.toFixed(2)} ± ${cmp.se.toFixed(2)})`;
+          gap.title = cmp.separated
+            ? `Measured on the same ${cmp.n.toLocaleString()} boards. The gap is more than twice its standard error, so it is unlikely to be noise.`
+            : `Measured on the same ${cmp.n.toLocaleString()} boards. The gap is smaller than twice its standard error — deal more boards per split to separate these.`;
+          item.appendChild(gap);
+        }
+      }
+
       const actions = document.createElement('div');
       actions.className = 'psi-actions';
       const loadBtn = document.createElement('button');
@@ -1644,11 +1745,37 @@
     });
   }
 
-  el('btnPracticeStart').addEventListener('click', () => { startPractice(); });
+  el('btnPracticeStart').addEventListener('click', () => {
+    hide('screen-landing');
+    show('screen-practice');
+    setPracticeMode('explore');
+  });
   el('btnPracticeNewHand').addEventListener('click', () => { startPractice(); });
   el('btnPracticeBack').addEventListener('click', () => {
+    rapid = null;
+    practiceMode = 'explore';
     hide('screen-practice');
     show('screen-landing');
+  });
+  document.querySelectorAll('#practiceModeRow .rapid-mode-btn').forEach((btn) => {
+    btn.addEventListener('click', () => setPracticeMode(btn.dataset.practiceMode));
+  });
+  el('handFilterSelect').addEventListener('change', () => {
+    applyHandFilterUi();
+    // a changed filter only takes effect on the next hand, so say so rather than
+    // silently leaving the current one in place
+    if (practiceMode === 'explore') startPractice();
+    else if (rapid && PRACTICE_DRILLS.includes(practiceMode)) {
+      rapid.next = null;
+      rapidNext();
+    }
+  });
+  ['handFilterMin', 'handFilterMax'].forEach((id) => {
+    el(id).addEventListener('change', () => {
+      applyHandFilterUi();
+      if (practiceMode === 'explore') startPractice();
+      else if (rapid && PRACTICE_DRILLS.includes(practiceMode)) { rapid.next = null; rapidNext(); }
+    });
   });
 
   // The slider element itself is a plain linear <input type="range"> — its raw value is
@@ -1701,6 +1828,8 @@
       enterLobby();
       renderLobby(room);
     } else if (room.phase === 'arranging') {
+      // Keep the header honest even if a state update lands after the screen was rendered.
+      el('handNumber').textContent = room.handNumber;
       updateLockStatus();
     } else if (room.phase === 'results') {
       if (revealInProgress) return; // don't let a late room_state event show the button mid-reveal
@@ -1716,6 +1845,134 @@
   // fires.
   wireSortControl('gameSortControl', renderGame);
   wireSortControl('practiceSortControl', renderPracticeArranger);
+
+  // ---------- practice: one screen, five modes ----------
+  // Explore is the original free-play mode (arrange, see EV, hunt the ideal split, save and
+  // compare). Arrange / Estimate EV / Locked NLH are the graded drills, and Mistakes is
+  // their shared retry list. They all deal from the same pool and obey the same hand
+  // filter, which is why they belong together rather than behind separate menu entries.
+  let practiceMode = 'explore';
+  const PRACTICE_MODE_CAPTIONS = {
+    explore: '— free play: arrange, price it, hunt the best split',
+    arrange: '— drill: build the highest-EV split',
+    estimate: '— drill: price each hand you build',
+    locked: '— drill: the NLH hand is fixed, maximise the rest',
+    mistakes: '— hands you misplayed, ready to re-drill'
+  };
+  const PRACTICE_DRILLS = ['arrange', 'estimate', 'locked'];
+
+  function setPracticeMode(mode) {
+    practiceMode = mode;
+    const isDrill = PRACTICE_DRILLS.includes(mode);
+    el('practiceExplore').classList.toggle('hidden', mode !== 'explore');
+    el('practiceDrill').classList.toggle('hidden', !isDrill);
+    el('practiceMistakes').classList.toggle('hidden', mode !== 'mistakes');
+    el('btnPracticeNewHand').classList.toggle('hidden', mode !== 'explore');
+    el('practiceModeCaption').textContent = PRACTICE_MODE_CAPTIONS[mode] || '';
+    // Mode switching is locked while a retry is in flight — but it has to be unlocked
+    // again the moment the retry ends, and the retry ends by landing on the Mistakes pane,
+    // which never re-renders the drill. So own the enabled state here rather than leaving
+    // it to whichever pane happened to render last.
+    const retrying = !!(rapid && rapid.retry);
+    document.querySelectorAll('#practiceModeRow .rapid-mode-btn').forEach((b) => {
+      const m = b.dataset.practiceMode;
+      b.classList.toggle('active', m === mode);
+      if (m !== 'mistakes' && m !== 'explore') b.disabled = retrying;
+    });
+
+    if (isDrill) {
+      ensureRapidState();
+      if (rapid.mode !== mode) {
+        // switching between drills starts a fresh hand for the new one
+        rapid.mode = mode;
+        rapid.current = null;
+        rapid.next = null;
+        el('rapidFeedback').classList.add('hidden');
+        renderRapidStats();
+        renderRapidDrill();
+        rapidNext();
+      } else {
+        renderRapidStats();
+        renderRapidDrill();
+        if (!rapid.current && !rapid.loading) rapidNext();
+      }
+    } else if (mode === 'mistakes') {
+      ensureRapidState();
+      setRapidView('mistakes');
+    } else if (!practice) {
+      startPractice();
+    }
+  }
+
+  // ---------- hand difficulty filter ----------
+  // Every pool entry carries `ev`: what the solver's own split for that hand is worth
+  // against the field, measured over 300 boards offline (see experiments/solve/
+  // measure_pool_ev.js). That makes "only deal me hands GTO can't win with" a lookup
+  // rather than something we'd have to solve for at deal time.
+  let handFilter = { kind: 'any', min: -Infinity, max: Infinity };
+
+  function poolHasEvData(pool) {
+    return !!(pool && pool.length && typeof pool[0].ev === 'number');
+  }
+
+  // Percentile cut points, computed once from the pool itself rather than hardcoded, so the
+  // presets stay honest if the pool is ever regenerated.
+  let evQuantiles = null;
+  function ensureEvQuantiles(pool) {
+    if (evQuantiles || !poolHasEvData(pool)) return evQuantiles;
+    const sorted = pool.map((e) => e.ev).sort((a, b) => a - b);
+    const at = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
+    evQuantiles = { p20: at(0.2), p30: at(0.3), p70: at(0.7), p80: at(0.8) };
+    return evQuantiles;
+  }
+
+  function handFilterRange(pool) {
+    const q = ensureEvQuantiles(pool);
+    switch (handFilter.kind) {
+      case 'rough': return q ? { min: -Infinity, max: q.p20 } : null;
+      case 'belowzero': return { min: -Infinity, max: 0 };
+      case 'average': return q ? { min: q.p30, max: q.p70 } : null;
+      case 'premium': return q ? { min: q.p80, max: Infinity } : null;
+      case 'custom': return { min: handFilter.min, max: handFilter.max };
+      default: return null;
+    }
+  }
+
+  function filteredPool(pool) {
+    const range = handFilterRange(pool);
+    if (!range || !poolHasEvData(pool)) return pool;
+    const out = pool.filter((e) => e.ev >= range.min && e.ev <= range.max);
+    // Never hand back an empty deck: a range nothing matches falls back to the full pool
+    // and the UI says so, rather than silently failing to deal.
+    return out.length >= 20 ? out : pool;
+  }
+
+  function renderHandFilterCount() {
+    const node = el('handFilterCount');
+    if (!opponentPool) { node.textContent = ''; return; }
+    if (!poolHasEvData(opponentPool)) {
+      node.textContent = 'this pool has no solved EVs, so filtering is unavailable';
+      return;
+    }
+    const range = handFilterRange(opponentPool);
+    if (!range) { node.textContent = `${opponentPool.length.toLocaleString()} hands available`; return; }
+    const matching = opponentPool.filter((e) => e.ev >= range.min && e.ev <= range.max).length;
+    const pct = ((matching / opponentPool.length) * 100).toFixed(0);
+    node.textContent = matching >= 20
+      ? `${matching.toLocaleString()} hands match (${pct}% of the pool)`
+      : `only ${matching} hands match — too few, dealing from the full pool instead`;
+  }
+
+  function applyHandFilterUi() {
+    const kind = el('handFilterSelect').value;
+    handFilter.kind = kind;
+    el('handFilterCustom').classList.toggle('hidden', kind !== 'custom');
+    const min = parseFloat(el('handFilterMin').value);
+    const max = parseFloat(el('handFilterMax').value);
+    handFilter.min = isNaN(min) ? -Infinity : min;
+    handFilter.max = isNaN(max) ? Infinity : max;
+    renderHandFilterCount();
+  }
 
   // ---------- rapid fire (GTO drills) ----------
   // Three drills on the one decision this game actually has, all scored against the same
@@ -1898,7 +2155,8 @@
   }
 
   function rapidSeedHand(pool) {
-    const seed = pool[Math.floor(Math.random() * pool.length)];
+    const usable = filteredPool(pool);
+    const seed = usable[Math.floor(Math.random() * usable.length)];
     return { seed, hand: [...seed.one, ...seed.two, ...seed.four] };
   }
 
@@ -2296,9 +2554,9 @@
       el('rapidRetryBanner').innerHTML = `↻ Retrying a stored ${m.tier.label.toLowerCase()} — same hand, same boards. Retries don't count toward your session average.`;
     }
 
-    document.querySelectorAll('#rapidModeRow .rapid-mode-btn').forEach((b) => {
-      b.classList.toggle('active', b.dataset.rapidMode === rapid.mode);
-      b.disabled = isRetry;
+    document.querySelectorAll('#practiceModeRow .rapid-mode-btn').forEach((b) => {
+      const m = b.dataset.practiceMode;
+      if (m && m !== 'mistakes' && m !== 'explore') b.disabled = isRetry;
     });
     el('rapidModeHint').textContent = RAPID_MODE_HINTS[rapid.mode];
     el('rapidAssist').checked = rapid.assist;
@@ -2492,7 +2750,7 @@
     if (!rapid) return;
     if (rapid.retry) {
       rapid.retry = null;
-      setRapidView('mistakes');
+      setPracticeMode('mistakes');
       return;
     }
     el('rapidFeedback').classList.add('hidden');
@@ -2619,31 +2877,26 @@
       : Object.assign({ mode: 'arrange' }, base, emptyArrangeFields());
     rapid.retry = { mistake: m, quiz };
     el('rapidFeedback').classList.add('hidden');
-    setRapidView('drill');
+    setPracticeMode(m.mode === 'locked' ? 'locked' : 'arrange');
   }
 
+  // The drills and free play are one screen now, so "view" just records which of the two
+  // drill panes is showing; which top-level mode is active lives in practiceMode.
   function setRapidView(view) {
+    if (!rapid) return;
     rapid.view = view;
-    el('rapid-tab-drill').classList.toggle('hidden', view !== 'drill');
-    el('rapid-tab-mistakes').classList.toggle('hidden', view !== 'mistakes');
-    document.querySelectorAll('#rapidTabs .tab-btn').forEach((b) => {
-      b.classList.toggle('active', b.dataset.rapidTab === view);
-    });
     if (view === 'drill') renderRapidDrill(); else renderRapidMistakes();
   }
 
-  async function startRapidFire() {
-    hide('screen-landing');
-    show('screen-rapid');
-    rapid = rapidNewState();
-    renderRapidStats();
-    renderRapidMistakes();
-    el('rapidFeedback').classList.add('hidden');
-    setRapidView('drill');
-    await rapidNext();
+  function ensureRapidState() {
+    if (!rapid) {
+      rapid = rapidNewState();
+      renderRapidStats();
+      renderRapidMistakes();
+    }
+    return rapid;
   }
 
-  el('btnRapidStart').addEventListener('click', () => { startRapidFire(); });
   el('btnRapidNext').addEventListener('click', () => rapidNext());
   el('btnRapidSubmit').addEventListener('click', () => rapidSubmitArrange());
   el('btnRapidEstSubmit').addEventListener('click', () => rapidSubmitEstimate());
@@ -2653,11 +2906,7 @@
     Object.assign(quiz, emptyArrangeFields());
     renderRapidDrill();
   });
-  el('btnRapidBack').addEventListener('click', () => {
-    rapid = null;
-    hide('screen-rapid');
-    show('screen-landing');
-  });
+
   el('rapidAssist').addEventListener('change', () => {
     if (!rapid) return;
     rapid.assist = el('rapidAssist').checked;
@@ -2670,16 +2919,12 @@
   RAPID_CATS.forEach((cat) => {
     el('rapidEst' + capitalize(cat)).addEventListener('input', renderRapidEstTotal);
   });
-  document.querySelectorAll('#rapidModeRow .rapid-mode-btn').forEach((btn) => {
-    btn.addEventListener('click', () => setRapidMode(btn.dataset.rapidMode));
-  });
-  document.querySelectorAll('#rapidTabs .tab-btn').forEach((btn) => {
-    btn.addEventListener('click', () => setRapidView(btn.dataset.rapidTab));
-  });
+
   wireSortControl('rapidSortControl', () => { if (rapid && rapid.view === 'drill') renderRapidDrill(); });
 
   document.addEventListener('keydown', (ev) => {
-    if (!rapid || el('screen-rapid').classList.contains('hidden')) return;
+    if (!rapid || el('screen-practice').classList.contains('hidden')) return;
+    if (practiceMode !== 'arrange' && practiceMode !== 'estimate' && practiceMode !== 'locked') return;
     const quiz = rapidActiveQuiz();
     // Only text entry should swallow the number keys — a focused checkbox (the assist
     // toggle) must not stop 1-7 from placing cards.

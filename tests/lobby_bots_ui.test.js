@@ -98,6 +98,13 @@ async function waitForServer(url, timeoutMs = 15000) {
     await page.waitForSelector('#screen-game:not(.hidden)', { timeout: 20000 });
     await page.waitForSelector('#tray .playing-card', { timeout: 20000 });
     assert(await page.locator('#tray .playing-card').count() === 7, 'the host is dealt a hand against the bots');
+    // the deal used to render from stale room state, showing "Hand #0" on the first deal
+    assert(sig(await page.locator('#handNumber').innerText()) === '1', 'the first deal is labelled Hand #1');
+
+    // a bot that is solving must be visibly distinct from a human who wandered off
+    const strip = sig(await page.locator('#seatStatus').innerText());
+    assert(/thinking|✓/.test(strip), 'the seat strip reports what each seat is doing (' + strip + ')');
+    assert(await page.locator('.seat-chip').count() === 3, 'every seat appears in the strip');
 
     // bots solve and lock themselves; the lock counter must move without anyone else acting
     await page.waitForFunction(() => {

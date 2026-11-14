@@ -34,6 +34,12 @@ function post(pathname, body) {
 
 // One SSE connection per seat, like a real client: the server keeps only the newest stream
 // for a player, so a second connection would silently starve the first.
+function matchesLater(ev, name) {
+  return name === 'room_state_arranging'
+    ? (ev.name === 'room_state' && ev.payload && ev.payload.phase === 'arranging')
+    : ev.name === name;
+}
+
 function connect(code, id, token) {
   const seen = [];
   let waiters = [];
@@ -49,15 +55,20 @@ function connect(code, id, token) {
         if (!name) continue;
         const payload = data ? JSON.parse(data) : null;
         seen.push({ name, payload });
-        waiters.filter((w) => w.name === name).forEach((w) => { w.done = true; w.resolve(payload); });
+        const ev = { name, payload };
+        waiters.filter((w) => matchesLater(ev, w.name)).forEach((w) => { w.done = true; w.resolve(payload); });
         waiters = waiters.filter((w) => !w.done);
       }
     });
   });
+  // 'room_state_arranging' is a convenience: the first room_state that announces the deal.
+  const matches = (ev, name) => name === 'room_state_arranging'
+    ? (ev.name === 'room_state' && ev.payload && ev.payload.phase === 'arranging')
+    : ev.name === name;
   return {
     close: () => req.destroy(),
     wait: (name, ms = 40000) => new Promise((resolve, reject) => {
-      const hit = seen.find((e) => e.name === name);
+      const hit = seen.find((e) => matches(e, name));
       if (hit) return resolve(hit.payload);
       const w = { name, resolve };
       waiters.push(w);
@@ -136,6 +147,9 @@ async function waitForServer(url, timeoutMs = 15000) {
     const guestStream = connect(host.code, guest.playerId, guest.token);
     const started = await post('/api/start_game', { code: host.code, playerId: host.playerId, token: host.token });
     assert(started.ok, 'the host can start a game with bots seated' + (started.error ? ' — ' + started.error : ''));
+    const dealt = await stream.wait('room_state_arranging');
+    assert(dealt.handNumber === 1, 'room state announcing the deal carries the new hand number');
+    assert(dealt.players.some((p) => p.isBot && p.thinking), 'bots are flagged as thinking while they solve');
     const mine = await stream.wait('your_hand');
     const theirs = await guestStream.wait('your_hand');
     assert(mine.hand.length === 7 && theirs.hand.length === 7, 'humans are dealt their hands');

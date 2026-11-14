@@ -39,8 +39,12 @@ homerun scoring is always on in the live game now.
   cheaper one-shot solve: best-response for NEW focal hands against an already-converged,
   FIXED opponent table (doesn't re-solve the opponent side). Used to scale up to many
   example hands without re-running the full bootstrap.
-- `solve_fixed_hr.js` — the homerun-scored counterpart to `solve_fixed.js`. This is what
-  produced `round5000_hr.json` from the converged `round5_hr.json` field.
+- `solve_fixed_hr.js` — the homerun-scored counterpart to `solve_fixed.js`.
+- `solve_fixed_hr_fast.js` — same job, same answers, but the inner loop is delegated to
+  `lib/bot.js`'s table-based solver (written for live bot seats). ~50ms per hand instead
+  of ~2.5s, which is what made growing the shipped pool to 15,000 hands a 5-minute job
+  rather than a 6-hour one. Cross-checked against this folder's own `pointsHomerun`
+  scorer partition by partition before use. Prefer it for any new scale-up.
 - `homerun.js` — for a batch of hands, computes BOTH the standard-optimal and
   homerun-optimal split from the *same* Monte Carlo trials, so the two are directly
   comparable. Uses the same corrected `pointsHomerun` definition as `common.js`.

@@ -1,5 +1,5 @@
 // build_opponent_pool_hr.js — merges the homerun-equilibrium-solved hand pools
-// (round5000_hr.json + round5_hr.json, both scored with the corrected full-match-sweep
+// (round14600_hr.json + round5_hr.json, both scored with the corrected full-match-sweep
 // homerun rule via solve_round_hr_chunked.js/solve_fixed_hr.js) into a single flat array
 // of near-optimal (hand, split) pairs, shipped to the browser as
 // public/opponent-pool.json to power Practice Mode's "perfect opponent."
@@ -11,10 +11,10 @@
 //
 // Two sources, both from the 400-hand homerun bootstrap:
 //   round5_hr.json    — the 400 bootstrap hands at their converged round-5 splits
-//   round5000_hr.json — 5000 further hands best-responding to that fixed round-5 field
+//   round14600_hr.json — 5000 further hands best-responding to that fixed round-5 field
 // Pool size matters directly for Practice Mode: only the entries sharing no card with
-// your dealt hand qualify as opponents (~1/3 of the pool), so 5400 entries gives roughly
-// 1800 distinct opponents per practice hand before any repetition.
+// your dealt hand qualify as opponents (~1/3 of the pool), so 15000 entries gives roughly
+// 5100 distinct opponents per practice hand before any repetition.
 //
 // Usage: node build_opponent_pool_hr.js > ../../public/opponent-pool.json
 const fs = require('fs');
@@ -26,7 +26,7 @@ function loadPartitions(file) {
 }
 
 const merged = [
-  ...loadPartitions('round5000_hr.json'),
+  ...loadPartitions('round14600_hr.json'),
   ...loadPartitions('round5_hr.json')
 ];
 

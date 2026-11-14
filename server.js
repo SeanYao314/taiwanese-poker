@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { URL } = require('url');
 const G = require('./lib/game.js');
 const P = require('./lib/poker.js');
@@ -49,8 +50,11 @@ function opponentPool() {
   return OPPONENT_POOL;
 }
 
-const BOT_MIN_THINK_MS = 400; // bots shouldn't lock before you've even seen your cards
-const BOT_MAX_THINK_MS = 1300;
+// Solving is fast now (~100ms), so this pause is purely cosmetic: just enough that the
+// "thinking" indicator registers and bots don't snap their hands in the instant you're
+// dealt yours. Kept short on purpose — waiting on bots is dead time.
+const BOT_MIN_THINK_MS = Number(process.env.BOT_MIN_THINK_MS) || 120;
+const BOT_MAX_THINK_MS = Number(process.env.BOT_MAX_THINK_MS) || 350;
 
 function makePlayer({ name, isBot = false }) {
   return {
@@ -64,7 +68,8 @@ function makePlayer({ name, isBot = false }) {
     connected: false,
     hand: null,
     assignment: null,
-    locked: false
+    locked: false,
+    thinking: false
   };
 }
 
@@ -90,7 +95,8 @@ function makeRoomCode() {
 }
 
 function publicPlayer(p) {
-  return { id: p.id, name: p.name, connected: p.connected, locked: p.locked, isBot: !!p.isBot };
+  return { id: p.id, name: p.name, connected: p.connected, locked: p.locked,
+    isBot: !!p.isBot, thinking: !!p.thinking };
 }
 
 function publicRoomState(room) {
@@ -134,6 +140,7 @@ function resetForNextHand(room) {
     p.hand = null;
     p.assignment = null;
     p.locked = false;
+    p.thinking = false;
   }
 }
 
@@ -148,9 +155,18 @@ function dealNewHand(room) {
     p.hand = hands[p.id];
     p.assignment = null;
     p.locked = false;
+    // Flagged before the first broadcast so the table sees "thinking" from the moment the
+    // hand is dealt, rather than a beat later.
+    p.thinking = !!p.isBot;
+  }
+  // Room state goes out BEFORE the private hands. The client renders the arranging screen
+  // when its hand arrives, reading the hand number from whatever room state it holds — so
+  // sending hands first made every hand render with the previous hand's number ("Hand #0"
+  // on the first deal).
+  broadcastState(room);
+  for (const p of room.players) {
     sendTo(p, 'your_hand', { hand: p.hand, assignment: null });
   }
-  broadcastState(room);
   runBots(room);
 }
 
@@ -183,6 +199,7 @@ function runBots(room) {
           if (G.validateAssignment(bot.hand, assignment)) assignment = Bot.fallbackSplit(bot.hand);
           bot.assignment = assignment;
           bot.locked = true;
+          bot.thinking = false;
           broadcastState(room);
           maybeFinishHand(room);
         }, wait);
@@ -211,6 +228,7 @@ function finishHand(room) {
   }
 
   room.phase = 'results';
+  for (const p of room.players) p.thinking = false;
   room.lastResults = {
     boards: room.boards,
     players: room.players.map((p) => ({ id: p.id, name: p.name, hand: p.hand, assignment: p.assignment })),
@@ -427,7 +445,36 @@ function handleStream(req, res, parsedUrl) {
   });
 }
 
-function serveStatic(pathname, res) {
+// Text assets are worth compressing: opponent-pool.json is ~900KB of repetitive card
+// strings and squeezes to a fraction of that. Compressed bytes are cached per file and
+// invalidated by size, since these are static files that only change on deploy.
+const COMPRESSIBLE = new Set(['.html', '.css', '.js', '.json']);
+const gzipCache = new Map();
+
+function sendMaybeGzipped(req, res, filePath, data) {
+  const ext = path.extname(filePath);
+  const type = MIME[ext] || 'application/octet-stream';
+  const accepts = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  if (accepts && COMPRESSIBLE.has(ext) && data.length > 1024) {
+    let hit = gzipCache.get(filePath);
+    if (!hit || hit.raw !== data.length) {
+      hit = { raw: data.length, buf: zlib.gzipSync(data) };
+      gzipCache.set(filePath, hit);
+    }
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Encoding': 'gzip',
+      'Content-Length': hit.buf.length,
+      Vary: 'Accept-Encoding'
+    });
+    res.end(hit.buf);
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': data.length });
+  res.end(data);
+}
+
+function serveStatic(pathname, res, req) {
   let rel = pathname === '/' ? '/index.html' : pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, rel));
   if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
@@ -436,9 +483,7 @@ function serveStatic(pathname, res) {
       if (err.code === 'ENOENT') { res.writeHead(404); res.end('Not found'); return; }
       res.writeHead(500); res.end('Server error'); return;
     }
-    const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
+    sendMaybeGzipped(req, res, filePath, data);
   });
 }
 
@@ -455,10 +500,10 @@ const server = http.createServer((req, res) => {
   // math (150 board runouts per redo, no server round-trip) runs the exact same
   // code as the server — no separate browser port to keep in sync.
   if (pathname === '/lib/poker.js' && req.method === 'GET') {
-    fs.readFile(path.join(__dirname, 'lib', 'poker.js'), (err, data) => {
+    const pokerPath = path.join(__dirname, 'lib', 'poker.js');
+    fs.readFile(pokerPath, (err, data) => {
       if (err) { res.writeHead(404); res.end('Not found'); return; }
-      res.writeHead(200, { 'Content-Type': MIME['.js'] });
-      res.end(data);
+      sendMaybeGzipped(req, res, pokerPath, data);
     });
     return;
   }
@@ -482,7 +527,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET') {
-    serveStatic(pathname, res);
+    serveStatic(pathname, res, req);
     return;
   }
 

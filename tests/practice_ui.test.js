@@ -1,5 +1,8 @@
-// End-to-end UI test for Rapid Fire's three drills, driven through real Chromium against
-// the real server. Run with: node tests/rapid_fire_ui.test.js
+// End-to-end UI test for Practice Mode's three graded drills, driven through real Chromium
+// against the real server. Run with: node tests/practice_ui.test.js
+//
+// The drills used to live behind their own "Rapid Fire" menu entry; they're now modes on
+// the Practice screen alongside free play, which is what the navigation here reflects.
 //
 // Unlike tests/poker.test.js this one is NOT dependency-free: it needs `playwright` with a
 // Chromium available (it skips itself cleanly if that's missing). It starts its own server
@@ -65,8 +68,10 @@ async function arrangeAllByKeyboard(page) {
     page.on('pageerror', (e) => { errors.push('pageerror: ' + e.message); console.error('  [browser pageerror]', e.message, e.stack ? '\n' + e.stack.split('\n').slice(0,3).join('\n') : ''); });
 
     await page.goto(`http://localhost:${PORT}/`);
-    await page.click('.tab-btn[data-tab="rapid"]');
-    await page.click('#btnRapidStart');
+    await page.click('.tab-btn[data-tab="practice"]');
+    await page.click('#btnPracticeStart');
+    await page.waitForSelector('#screen-practice:not(.hidden)', { timeout: 30000 });
+    await page.click('.rapid-mode-btn[data-practice-mode="arrange"]');
 
     // ---- arrange mode ----
     await page.waitForSelector('#rapidArrange:not(.hidden)', { timeout: 60000 });
@@ -117,7 +122,7 @@ async function arrangeAllByKeyboard(page) {
 
     // ---- mistakes tab + retry (arrange) ----
     if (misses > 0) {
-      await page.click('.tab-btn[data-rapid-tab="mistakes"]');
+      await page.click('.rapid-mode-btn[data-practice-mode="mistakes"]');
       await page.waitForSelector('.rapid-mistake');
       assert(await page.locator('.rapid-mistake').count() === misses, 'every arrange miss is listed in Mistakes');
       const first = page.locator('.rapid-mistake').first();
@@ -133,13 +138,13 @@ async function arrangeAllByKeyboard(page) {
       await page.waitForSelector('.rapid-mistake');
       const avgAfter = (await page.locator('.rapid-stat.headline .rs-value').innerText()).trim();
       assert(avgAfter === avgArrange, 'a retry does not move the session average (' + avgArrange + ')');
-      await page.click('.tab-btn[data-rapid-tab="drill"]');
+      await page.click('.rapid-mode-btn[data-practice-mode="arrange"]');
     } else {
       console.log('note: no arrange misses this run, mistake-tab assertions skipped');
     }
 
     // ---- estimate mode: arrange it yourself, then price each hand ----
-    await page.click('.rapid-mode-btn[data-rapid-mode="estimate"]');
+    await page.click('.rapid-mode-btn[data-practice-mode="estimate"]');
     await page.waitForSelector('#rapidEstimate:not(.hidden)', { timeout: 60000 });
     await page.waitForSelector('#rTray .playing-card', { timeout: 60000 });
     assert(await page.locator('#rapidArrange:not(.hidden)').count() === 1, 'estimate mode lets you arrange the hand yourself');
@@ -226,7 +231,7 @@ async function arrangeAllByKeyboard(page) {
 
     // ---- locked NLH mode ----
     await page.click('#btnRapidNext');
-    await page.click('.rapid-mode-btn[data-rapid-mode="locked"]');
+    await page.click('.rapid-mode-btn[data-practice-mode="locked"]');
     await page.waitForSelector('#rapidLocked:not(.hidden)', { timeout: 60000 });
     await page.waitForSelector('.rapid-locked-choice', { timeout: 60000 });
     assert(await page.locator('#rapidLockedTwo .playing-card').count() === 2, 'locked mode shows the fixed 2-card NLH hand');

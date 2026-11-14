@@ -40,7 +40,7 @@ Run the sanity test suite any time with:
 node tests/poker.test.js          # dependency-free: evaluator + scoring engine
 node tests/bot.test.js            # dependency-free: GTO bot split quality
 node tests/bots_api.test.js       # dependency-free: bot seats over real HTTP + SSE
-node tests/rapid_fire_ui.test.js  # drives Rapid Fire in real Chromium (needs playwright)
+node tests/practice_ui.test.js    # drives the practice drills in real Chromium (needs playwright)
 node tests/lobby_bots_ui.test.js  # drives the lobby bot controls in Chromium (needs playwright)
 ```
 
@@ -85,14 +85,41 @@ and a freshly dealt 7-card hand essentially never appears in it. So each bot **s
 own hand every deal** (`lib/bot.js`), scoring all 105 ways to split it against a sample of
 board runouts — where the opponents it samples are drawn from the solved pool, so it's
 best-responding to near-equilibrium play rather than to random splitting. Homerun scoring is
-included, since it's always on. On a modest machine that's roughly a second per bot per
-hand.
+included, since it's always on.
 
-That work is deliberately chunked, with a yield back to the event loop between batches. The
-server is a single-threaded Node process holding everyone's SSE streams, so a synchronous
-one-second solve would freeze the whole table every time a bot "thinks". Bots also wait a
-beat before locking, so they don't snap their hands in before you've finished reading your
-own cards.
+### Why it's fast
+
+Done naively that's ~10,000 five-card evaluations per trial and takes about 100ms *per
+trial*, which made a 4-seat table genuinely painful. Almost all of it is repeated work,
+because across all 105 partitions of the same seven cards there are only 7 distinct 1-card
+hands, 21 distinct 2-card hands, and 21 distinct hole *pairs* — and a PLO hand is by
+definition exactly 2 hole cards plus exactly 3 board cards, so the best PLO hand for a
+4-card group is just the best of its 6 pairs. The 4-card groups never need evaluating at
+all.
+
+So per board the bot builds three small tables once — the board on its own, each single card
+with 4 board cards, each pair with 3 board cards — and every hand any partition could hold
+becomes a max over a couple of table entries. That's 246 evaluations per board instead of
+~5,000, and scoring a partition afterwards is array lookups and integer adds:
+
+| | before | after |
+|---|---|---|
+| one bot | 1,694 ms | **113 ms** |
+| three bots (a full table) | 6,347 ms | **540 ms** |
+| worst event-loop stall | 696 ms | **22 ms** |
+
+That last row is the one that made the game feel buggy rather than merely slow: the server
+is a single-threaded Node process holding every player's SSE stream, so a bot that blocks
+for 696ms freezes *everyone* — clicks ignored, updates stuck. The solve is now time-sliced,
+yielding back to the event loop every few milliseconds, so the table stays responsive even
+with three bots solving at once. `tests/bot.test.js` cross-checks the fast path against a
+naive evaluation partition by partition: it's the same answers, just without the repeated
+work.
+
+While a bot is solving, the arranging screen shows a **seat strip** across the top — one
+chip per seat, with pulsing dots next to any bot that's thinking, a checkmark once a seat
+has locked, and "arranging…" for humans still deciding. Without it a solving bot looks
+exactly like a human who wandered off, which is precisely when a game feels hung.
 
 Two things worth knowing about how they play. A bot only knows its own seven cards — it
 samples hypothetical opponents from the pool rather than peeking at what anyone actually
@@ -101,17 +128,35 @@ holds, so it isn't cheating with hidden information. And it's best-responding to
 printing money; `tests/bot.test.js` checks it beats a random split by a clear margin on
 boards it never solved against, which is the honest version of "is it actually solving?"
 
-## Practice Mode (solo, no room needed)
+## Practice (solo, no room needed)
 
-The landing page's **Practice** tab drops you straight into a single-player training screen — no room, no other players. You're dealt one random 7-card hand and try different ways to split it; each split is scored against a batch of independent board runouts — **100 to 10,000, adjustable with a logarithmic slider** on the practice screen (defaults to 150) — every one against an opponent hand pulled from a pool that was pre-solved offline via the iterative best-response bootstrap in `experiments/solve/` (see below) — a strong, empirically near-equilibrium opponent, not a random one. The slider is logarithmic rather than linear because 100–10,000 spans two orders of magnitude — a linear slider would waste almost all of its travel on the 1000+ end and make it nearly impossible to land on smaller values like 200. Changing the slider takes effect on your next **New Hand**, not retroactively, so a hand's comparisons always stay apples-to-apples.
+The landing page's **Practice** tab drops you straight into a single-player training screen — no room, no other players. You're dealt one random 7-card hand and try different ways to split it; each split is scored against a batch of independent board runouts — **100 to 10,000, adjustable with a logarithmic slider** on the practice screen (defaults to 500) — every one against an opponent hand pulled from a pool that was pre-solved offline via the iterative best-response bootstrap in `experiments/solve/` (see below) — a strong, empirically near-equilibrium opponent, not a random one. The slider is logarithmic rather than linear because 100–10,000 spans two orders of magnitude — a linear slider would waste almost all of its travel on the 1000+ end and make it nearly impossible to land on smaller values like 200. Changing the slider takes effect on your next **New Hand**, not retroactively, so a hand's comparisons always stay apples-to-apples.
 
 Rearranging your cards and re-running is instant regardless of the board count: the same evaluator that scores live games (`lib/poker.js`) is served straight to the browser at `/lib/poker.js` and runs entirely client-side, so there's no server round-trip per attempt. Critically, every split you try during a session is scored against the exact same trial set — generated once when the hand is dealt — so the EV numbers are directly comparable to each other; the difference between two splits' EV isn't muddied by fresh Monte Carlo noise each time. Save a split to build up a leaderboard of your attempts on that hand, sorted by EV, with one-click reload to keep tweaking a promising one.
 
 Alongside the average EV, the results panel also reports the **variance and standard deviation** of that split's outcome (how swingy it is trial to trial) and the **standard error of the EV estimate itself** — a rough sense of how far the displayed average might still be from the true long-run EV given only `n` boards. Pushing the slider up shrinks that standard error (it scales with 1/√n), which is the actual reason to reach for more boards than the 150 default: at 150 boards the estimate is fairly noisy, at 10,000 it's tight.
 
-Note on board count and opponent diversity: the pre-solved opponent pool has ~5400 hands total, of which roughly a third qualify (don't share a card with yours) for any given practice hand — about 1800 distinct opponents, so the default 150 boards, and even the ideal-split search's default of 1000, draw a fresh opponent on every trial. Past ~1800 boards opponents start repeating across trials (always with fresh boards each time, never a duplicate card within a single trial). More boards still means less noise in the EV estimate; it just doesn't buy more opponent variety past that point.
+### How accurate is the EV number?
 
-Stuck, or just want to check your work? **Show Ideal Split** scores the 105 ways to split your 7 cards against your trial set and shows you the best one, with a "Load Ideal Split" button to drop it straight into your slots. It has its own separate **Ideal split search boards** slider — also logarithmic, 100–10,000 — independent from the EV panel's slider above it, since the search is much more expensive per board (up to 105 partitions vs. 1); defaults to 1,000 but you're free to push it higher for a slower, more precise search, or lower for a quicker (noisier) one. It's clamped down to however many boards this hand actually has (set by the EV slider at deal time), and the panel says so explicitly whenever that clamp kicks in, so the ideal split's EV and your own arrangement's EV aren't silently being compared across different-sized samples.
+The panel tells you directly: alongside the average it prints the standard deviation of the
+per-hand outcome and the **standard error of the estimate itself**. At the default 500
+boards a typical hand reads something like `SD ±7.4 pts/hand · accurate to roughly ±0.33
+(1 SE)`. Error falls with the square root of the board count, so 500 → 2,000 halves it and
+500 → 10,000 cuts it by well over half again.
+
+The absolute EV is the noisy part. What you usually want to know — *is this split better
+than that one?* — is measured much more sharply, because every split you try is scored
+against the **same** boards. That makes two splits a paired sample, so most of the board
+luck cancels and what matters is the spread of their per-board difference. The Saved Splits
+list uses exactly that: each split below the leader shows its gap and that gap's own
+standard error (`#1 by 1.37 ± 0.28`), and when the gap doesn't clear two standard errors it
+says **too close to call** instead, because at that point the boards you've run genuinely
+cannot separate them. In practice the paired comparison is about twice as precise as
+comparing the two averages independently.
+
+Note on board count and opponent diversity: the pre-solved opponent pool has **15,000 hands**, of which roughly a third qualify (don't share a card with yours) for any given practice hand — about **5,100 distinct opponents**, so the default 500 boards and the ideal-split search's default of 2,000 both draw a fresh opponent on every trial. Past ~5,100 boards opponents start repeating across trials (always with fresh boards each time, never a duplicate card within a single trial). More boards still means less noise in the EV estimate; it just doesn't buy more opponent variety past that point.
+
+Stuck, or just want to check your work? **Show Ideal Split** scores the 105 ways to split your 7 cards against your trial set and shows you the best one, with a "Load Ideal Split" button to drop it straight into your slots. It has its own separate **Ideal split search boards** slider — also logarithmic, 100–10,000 — independent from the EV panel's slider above it, since the search is much more expensive per board (up to 105 partitions vs. 1); defaults to 2,000 but you're free to push it higher for a slower, more precise search, or lower for a quicker (noisier) one. It's clamped down to however many boards this hand actually has (set by the EV slider at deal time), and the panel says so explicitly whenever that clamp kicks in, so the ideal split's EV and your own arrangement's EV aren't silently being compared across different-sized samples.
 
 Under the hood, this isn't a flat exhaustive search anymore — it's a successive-halving/racing search: all 105 partitions get scored for the first 200 boards, only the top 10 continue on to 1,000 boards, and only the top 3 of those continue on to the rest of the requested count (everything is cumulative — a survivor's final score reflects every board from 0 onward, nothing is re-run). Eliminated partitions just stop accumulating once they're cut, on the reasoning that 200-1000 boards is already plenty to see when a split is clearly out of contention. That turns what used to be flat `boards × 105` work into roughly `200×105 + 800×10 + (rest)×3` — at 10,000 boards, about a 12x reduction in raw work (and a 6x-ish reduction in wall-clock time after browser overhead), which is what makes the higher end of the search slider actually usable instead of taking minutes. Checkpoints beyond your requested board count are simply skipped, so at 100-200 boards this is identical to the old flat search. Verified against a full exhaustive search on a 5,000-board case: the staged search picked the exact same #1, #2, and #3 partitions a brute-force scoring of all 105 would have. That said, it's a heuristic, not a hard guarantee — a partition could in principle get unlucky in its first 200 boards and fall out of contention before it had a chance to catch up, so on rare hands the reported "ideal" might not be the literal global optimum, just very likely to be.
 
@@ -119,20 +164,41 @@ Cost scales with however many boards the search slider asks for — a few second
 
 Underneath "Load Ideal Split," a collapsed **"Show next 2 runner-up splits"** section (open it to expand) reveals the 2nd- and 3rd-best partitions from that same search, each with its own EV and a "Load This Split" button — useful for seeing whether the top split is a clear standout or basically tied with a couple of close alternatives.
 
-The opponent pool itself ships as `public/opponent-pool.json`, built by `experiments/solve/build_opponent_pool_hr.js` from `round5000_hr.json` + `round5_hr.json` (5400 pre-solved hands total, all solved under homerun scoring).
+The opponent pool itself ships as `public/opponent-pool.json`, built by `experiments/solve/build_opponent_pool_hr.js` from `round14600_hr.json` + `round5_hr.json` (15,000 pre-solved hands total, all solved under homerun scoring). It's about 900KB of repetitive card strings, so the server gzips it on the way out — roughly 150KB over the wire.
 
 Homerun scoring is always included here too, the same as in live games — there's no toggle for it. Every EV number on the practice screen already factors in the sweep bonus (sweep all 6 comparisons against this opponent, both boards, no ties, and the match total doubles 12→24), and a "swept X/N boards" line shows how often a given split actually connects for it. **Show Ideal Split** is homerun-aware too: the search itself optimizes for homerun-inclusive EV, not just raw comparison points, since a split that sets up more sweeps can beat a higher-raw-EV split once the bonus is in play.
 
 The opponent itself is homerun-aware too, not just the scoring: `public/opponent-pool.json` is solved by `experiments/solve/solve_round_hr.js` + `solve_fixed_hr.js` under the exact same full-match-sweep homerun rule the live game uses, so the opponent you're practicing against has actually adapted its splits to the sweep bonus, not just a standard-optimal opponent with the bonus tacked onto the scoring. See "Strategy research" below for how that pool was solved.
 
-## Rapid Fire (GTO drills)
+### Choosing which hands you get
 
-The landing page's **Rapid Fire** tab holds three drills on the only real decision this game
-has. All three score against the same homerun-solved opponents Practice Mode uses (with the
-full-match-sweep bonus, since it's always on), and all three draw their hands from the solved
-pool itself, so the offline solver's own split for a hand is always reachable. "Best" is
-always whatever genuinely graded best on that hand's boards, never an assumption about what
-the solver picked.
+Every pool entry carries the EV of the solver's own split for that hand, measured offline
+over 300 boards (`experiments/solve/measure_pool_ev.js`). That turns "only deal me hands GTO
+can't win with" into a lookup instead of something that would have to be solved for at deal
+time, and it powers the **hand filter** at the top of the practice screen.
+
+Pick a preset — a rough spot (bottom 20%), a losing hand (below 0), around average, a
+premium hand (top 20%) — or set a custom range, e.g. max `-1.5` to drill only hands where
+even perfect play is losing ground. The percentile cut points are computed from the pool
+itself rather than hardcoded, so they stay honest if the pool is regenerated. The filter
+applies to every mode, free play and drills alike, and the line beside it says how many hands
+match; if a range matches too few to practise with, it falls back to the whole pool and says
+so rather than silently failing to deal.
+
+Two honest caveats. The number is the EV of the *stored* split, not a proof of the true
+optimum — it's measured rather than re-solved, which is deliberate, because taking the best
+of 105 noisy estimates biases the figure upward while measuring one fixed split does not. And
+at 300 boards it carries a standard error around ±0.4, so hands sitting within roughly half a
+point of your threshold are classified with some noise; the bulk of a filtered set is firmly
+inside the range you asked for.
+
+### The drills
+
+The same screen holds four modes plus a shared Mistakes list. **Explore** is the free-play
+mode described above — arrange, price it, hunt the ideal split, save and compare. The other
+three are graded drills on the same decision, scored against the same opponents, and they
+were previously a separate "Rapid Fire" menu entry. They're modes here because they are
+genuinely the same activity: the same pool, the same scoring, the same hand filter.
 
 ### Arrange
 
@@ -284,6 +350,6 @@ public/opponent-pool.json Pre-solved (hand, split) pairs powering Practice Mode 
 tests/poker.test.js      Dependency-free sanity tests (run with `node tests/poker.test.js`)
 tests/bot.test.js        Dependency-free bot split-quality tests
 tests/bots_api.test.js   Dependency-free bot-seat tests over real HTTP + SSE
-tests/rapid_fire_ui.test.js  Rapid Fire end-to-end UI test (real Chromium via playwright)
+tests/practice_ui.test.js    Practice drills end-to-end UI test (real Chromium via playwright)
 tests/lobby_bots_ui.test.js  Lobby bot controls UI test (real Chromium via playwright)
 ```
