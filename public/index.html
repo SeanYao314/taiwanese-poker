@@ -229,13 +229,15 @@
       </div>
 
       <div id="practiceExplore">
-        <p class="hint" style="margin-top:0;">Vs. a pre-solved near-optimal opponent, averaged over <span id="practiceHintTrials">500</span> board runouts per split.</p>
+        <p class="hint" style="margin-top:0;">Vs. a pre-solved near-optimal opponent, averaged over as many board runouts as the precision setting calls for.</p>
         <p id="practiceSolvedEv" class="practice-solved-ev hidden"></p>
 
-      <div class="practice-trials-control">
-        <label for="practiceTrialsRange">Boards per split: <span id="practiceTrialsValue">500</span></label>
-        <input type="range" id="practiceTrialsRange" />
-        <span class="hint-inline">Logarithmic slider, 100&ndash;10,000 &mdash; controls the EV/variance panel. More boards means a tighter EV estimate: the error shrinks with the square root of this number, and the panel below reports exactly how precise the current estimate is. "Show Ideal Split" has its own board count. Applies on your next New Hand.</span>
+      <div class="precision-row" id="precisionRow">
+        <label>EV precision</label>
+        <button type="button" class="precision-btn active" data-precision="standard">Standard <span>±0.05</span></button>
+        <button type="button" class="precision-btn" data-precision="deep">Deep <span>±0.03</span></button>
+        <button type="button" class="precision-btn" data-precision="max">Max <span>±0.02</span></button>
+        <span class="hint-inline" id="precisionNote"></span>
       </div>
 
       <div class="slots" id="practiceSlots">
@@ -266,11 +268,6 @@
         <div class="tray" id="pTray"></div>
       </div>
 
-      <div class="practice-trials-control practice-ideal-trials-control">
-        <label for="practiceIdealTrialsRange">Ideal split search boards: <span id="practiceIdealTrialsValue">2,000</span></label>
-        <input type="range" id="practiceIdealTrialsRange" />
-        <span class="hint-inline">Logarithmic, 100&ndash;10,000 &mdash; separate from the slider above, since the search itself is much more expensive per board. Clamped to however many boards this hand has. Applies the next time you click "Show Ideal Split."</span>
-      </div>
 
       <div class="actions">
         <button id="btnPracticeClear" class="secondary">Clear</button>

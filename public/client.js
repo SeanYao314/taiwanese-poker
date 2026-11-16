@@ -386,6 +386,24 @@
     }
   }
 
+  // A room_state event is the server's one source of truth about the room, so this is the
+  // single place a phase change moves the player between screens.
+  function handleRoomState(room) {
+    state.room = room;
+    if (room.phase === 'lobby') {
+      enterLobby();
+      renderLobby(room);
+    } else if (room.phase === 'arranging') {
+      // Keep the header honest even if a state update lands after the screen was rendered.
+      el('handNumber').textContent = room.handNumber;
+      updateLockStatus();
+    } else if (room.phase === 'results') {
+      if (revealInProgress) return; // don't let a late room_state event show the button mid-reveal
+      const isHost = room.hostId === state.playerId;
+      if (isHost) show('btnNextHand'); else hide('btnNextHand');
+    }
+  }
+
   // ---------- arranging ----------
   function liveCapacity() {
     return CAPACITY;
@@ -961,50 +979,6 @@
   // documented in experiments/solve/. Re-arranging your own hand re-scores instantly
   // against the SAME set of trials, so EV differences between your attempts are directly
   // comparable (no fresh variance each redo).
-  const PRACTICE_TRIALS_MIN = 100;
-  const PRACTICE_TRIALS_MAX = 10000;
-  const PRACTICE_TRIALS_DEFAULT = 500;
-  let practiceTrialTarget = PRACTICE_TRIALS_DEFAULT; // takes effect on the next dealt hand
-
-  // The board-count slider is logarithmic (100 to 10,000 spans two orders of magnitude —
-  // a linear slider would waste almost all of its travel on the 1000-10000 range and make
-  // it nearly impossible to land precisely on, say, 200). The <input type="range"> itself
-  // stays a plain linear control internally (0..PRACTICE_SLIDER_STEPS); these two helpers
-  // convert between that raw position and an actual trial count, snapped to a clean-ish
-  // number so the displayed value doesn't look like random noise (e.g. "2340" not "2337").
-  const PRACTICE_SLIDER_STEPS = 1000;
-  function practiceSliderToTrials(raw) {
-    const t = Math.min(1, Math.max(0, raw / PRACTICE_SLIDER_STEPS));
-    const logMin = Math.log10(PRACTICE_TRIALS_MIN);
-    const logMax = Math.log10(PRACTICE_TRIALS_MAX);
-    const exact = Math.pow(10, logMin + t * (logMax - logMin));
-    let snapped;
-    if (exact < 1000) snapped = Math.round(exact / 10) * 10;
-    else if (exact < 3000) snapped = Math.round(exact / 50) * 50;
-    else snapped = Math.round(exact / 100) * 100;
-    return Math.min(PRACTICE_TRIALS_MAX, Math.max(PRACTICE_TRIALS_MIN, snapped));
-  }
-  function practiceTrialsToSlider(trials) {
-    const logMin = Math.log10(PRACTICE_TRIALS_MIN);
-    const logMax = Math.log10(PRACTICE_TRIALS_MAX);
-    const t = (Math.log10(trials) - logMin) / (logMax - logMin);
-    return Math.round(t * PRACTICE_SLIDER_STEPS);
-  }
-
-  // "Show Ideal Split" has its own separate board-count slider (same 100-10,000 log range
-  // and the same helpers above) instead of always riding on the EV panel's slider — the
-  // ideal split search is far more expensive per board (105 partitions vs. 1), so someone
-  // running 10,000 boards through the EV panel usually still wants the search itself to
-  // stay fast, but they can dial it up if they want a slower, more precise search. It's
-  // sticky (unlike the EV slider, it applies immediately, not just on New Hand) and gets
-  // clamped down to however many boards this hand actually has if set higher than that.
-  const PRACTICE_IDEAL_TRIALS_DEFAULT = 2000;
-  let practiceIdealTrialTarget = PRACTICE_IDEAL_TRIALS_DEFAULT;
-
-  // Homerun scoring is always part of the game now, so Practice Mode's EV calculations
-  // and the ideal-split search always factor it in too — there's no toggle for it.
-  const practiceHomerunMode = true;
-  const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
   let opponentPool = null; // cached after first fetch
   let practice = null; // { hand, trials, assignment, selectedCard, saved: [] }
 
@@ -1034,12 +1008,20 @@
     let chosen;
     if (qualifying.length >= trialCount) {
       chosen = shuffleArray(qualifying).slice(0, trialCount);
+    } else if (qualifying.length) {
+      // More boards than opponents: cycle through the whole qualifying set (reshuffled each
+      // pass) so every opponent is used an equal number of times, instead of drawing at
+      // random and leaving some opponents over-sampled and others untouched. Measured at
+      // 14,000 boards this makes the EV estimate ~44% tighter for the same board count,
+      // which is most of the reason a ±0.05 standard error is affordable at all.
+      chosen = [];
+      while (chosen.length < trialCount) {
+        const pass = shuffleArray(qualifying);
+        for (let i = 0; i < pass.length && chosen.length < trialCount; i++) chosen.push(pass[i]);
+      }
     } else {
-      // The pre-solved opponent pool has ~5400 hands total, and roughly a third of those
-      // qualify (don't share a card with yours) for any given hand — about 1800 distinct
-      // opponents, so the default 150 boards and the ideal-split search's default 1000 both
-      // draw a fresh opponent every trial. Past ~1800 opponents start repeating (with fresh
-      // boards each trial). Still zero risk of a duplicate card within any single trial.
+      // No qualifying opponents at all (only possible with a broken pool) — fall back to
+      // random draws so practice still works rather than dealing nothing.
       chosen = [];
       for (let i = 0; i < trialCount; i++) {
         chosen.push(qualifying[Math.floor(Math.random() * qualifying.length)] || pool[i % pool.length]);
@@ -1065,22 +1047,19 @@
 
     const pool = await loadOpponentPool();
     renderHandFilterCount();
-    // Explore deals from the pool too (not a raw shuffle) so the hand filter applies here
-    // as well, and so the hand's own solved EV is known. Pool hands are themselves random
-    // 7-card hands, so with no filter this is the same distribution as before.
     const usable = filteredPool(pool);
     const seed = usable[Math.floor(Math.random() * usable.length)];
     const hand = [...seed.one, ...seed.two, ...seed.four];
-    const trials = buildPracticeTrials(hand, pool, practiceTrialTarget);
 
     practice = {
       hand,
       solvedEv: typeof seed.ev === 'number' ? seed.ev : null,
-      trials,
+      tables: newTables(hand, precision().cap, { one: seed.one, two: seed.two, four: seed.four }),
       assignment: { one: [], two: [], four: [] },
       selectedCard: null,
       saved: [],
-      ideal: null
+      ideal: null,
+      growing: true
     };
     el('practiceIdealPanel').classList.add('hidden');
     const idealBtn = el('btnPracticeIdeal');
@@ -1089,6 +1068,43 @@
     renderPracticeArranger();
     renderPracticeSaved();
     renderPracticeSolvedEv();
+
+    // Seed enough boards for an immediate reading, then keep adding in the background
+    // until the target precision is reached. The panel updates after every chunk, so the
+    // number is live from the first moment and simply tightens.
+    const me = practice;
+    const batch = buildPracticeTrials(hand, pool, PRECISION_SEED_BOARDS);
+    for (let i = 0; i < batch.length; i++) addTrialToTables(me.tables, batch[i]);
+    if (practice === me) renderPracticeArranger();
+
+    growTablesAsync(me.tables, pool,
+      () => (practice === me && practiceArrangementComplete() ? practice.assignment : null),
+      () => { if (practice === me) refreshPracticeEv(); })
+      .then(() => { if (practice === me) { me.growing = false; refreshPracticeEv(); } });
+  }
+
+  function practiceArrangementComplete() {
+    return !!practice && practice.assignment.one.length === 1
+      && practice.assignment.two.length === 2 && practice.assignment.four.length === 4;
+  }
+
+  // Re-score the current arrangement from the tables. This is the operation that used to
+  // cost seconds and now costs a fraction of a millisecond, which is what lets it run on
+  // every edit and after every chunk of new boards.
+  function refreshPracticeEv() {
+    if (!practice || !practiceArrangementComplete() || !practice.tables.n) {
+      el('practiceEvPanel').classList.add('hidden');
+      return;
+    }
+    const result = evalFromTables(practice.tables, practice.assignment, { keepPerTrial: true });
+    practice.lastEv = result;
+    renderPracticeEV(result);
+    // The ideal split was computed against fewer boards than we now have, so drop it
+    // rather than leave a stale answer on screen next to a fresher EV.
+    if (practice.ideal && practice.ideal.n !== practice.tables.n) {
+      practice.ideal = null;
+      el('practiceIdealPanel').classList.add('hidden');
+    }
   }
 
   function practiceTrayCards() {
@@ -1165,6 +1181,9 @@
     return cat === 'four' ? window.Poker.bestPLO(cards, board) : window.Poker.bestGeneric(cards, board);
   }
 
+  // Same point schedule as lib/game.js: the bigger the hand, the more it's worth per board.
+  const PRACTICE_POINTS = { one: 1, two: 2, four: 3 };
+
   // Matches lib/game.js's rule exactly: sweeping all 6 comparisons against this one
   // opponent (both boards, all 3 hand sizes, no ties anywhere) doubles the match total
   // for that trial, 12 -> 24 (or -24 if you're the one swept). The opponent's split in
@@ -1200,6 +1219,284 @@
       else if (allLost) { total -= PRACTICE_MATCH_TOTAL; homerun = 'loss'; }
     }
     return { total, cells, homerun };
+  }
+
+  // ---------- per-trial delta tables ----------
+  // The expensive part of an EV estimate is evaluating poker hands, and re-scoring the same
+  // hand after every edit re-does all of it. But for a FIXED set of seven cards and a fixed
+  // board, there are only 7 possible 1-card hands, 21 possible 2-card hands and 35 possible
+  // 4-card hands — and what we ultimately need isn't the hand strength, it's the point
+  // delta against that trial's opponent, which is one of {-pts, 0, +pts}.
+  //
+  // So we evaluate each trial once, up front, and store those deltas: 7 + 21 + 35 numbers
+  // per board. After that, scoring ANY arrangement is three array lookups per board plus a
+  // homerun check — no hand evaluation at all. Re-scoring stops costing anything that
+  // scales with the board count, which is what makes a ±0.05 standard error affordable as
+  // a default instead of a luxury.
+  //
+  // Memory is a byte per entry: 126 bytes per trial, so even 60,000 boards is ~7MB.
+  const TABLE_PAIRS = [];
+  const TABLE_PAIR_AT = [];
+  for (let a = 0; a < 7; a++) for (let b = a + 1; b < 7; b++) { TABLE_PAIR_AT[a * 7 + b] = TABLE_PAIR_AT[b * 7 + a] = TABLE_PAIRS.length; TABLE_PAIRS.push([a, b]); }
+  const TABLE_QUADS = [];
+  for (let a = 0; a < 7; a++) for (let b = a + 1; b < 7; b++) for (let c = b + 1; c < 7; c++) for (let d = c + 1; d < 7; d++) TABLE_QUADS.push([a, b, c, d]);
+  const TABLE_QUAD_AT = new Map(TABLE_QUADS.map((q, i) => [q.join(','), i]));
+  const TABLE_QUAD_PAIRS = TABLE_QUADS.map((q) => {
+    const out = [];
+    for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) out.push(TABLE_PAIR_AT[q[a] * 7 + q[b]]);
+    return out;
+  });
+  const BOARD_SUBSETS_4 = [];
+  for (let drop = 0; drop < 5; drop++) BOARD_SUBSETS_4.push([0, 1, 2, 3, 4].filter((x) => x !== drop));
+  const BOARD_SUBSETS_3 = [];
+  for (let x = 0; x < 5; x++) for (let y = x + 1; y < 5; y++) for (let z = y + 1; z < 5; z++) BOARD_SUBSETS_3.push([x, y, z]);
+
+  function newTables(hand, capacity, fallbackRef) {
+    return {
+      hand,
+      pos: new Map(hand.map((c, i) => [c, i])),
+      handI: window.Poker.cardsToInts(hand),
+      n: 0,
+      capacity,
+      fallbackRef: fallbackRef || null,
+      d1: new Int8Array(capacity * 2 * 7),
+      d2: new Int8Array(capacity * 2 * TABLE_PAIRS.length),
+      d4: new Int8Array(capacity * 2 * TABLE_QUADS.length)
+    };
+  }
+
+  // Scratch buffers, reused across every trial so the hot loop allocates nothing.
+  const SINGLE_ = new Int32Array(7);
+  const PAIR_ = new Int32Array(TABLE_PAIRS.length);
+  const BOARD_ = new Int32Array(5);
+  const OPP_INTS_ = new Int32Array(4);
+
+  // Evaluate one trial into the tables. This is the only place hand evaluation happens for
+  // practice scoring, and it runs ~500 times per board, so everything here is integers:
+  // cards are ints, hand strengths come back from eval5i as one comparable int, and
+  // "which is better" is Math.max rather than a lexicographic array walk.
+  function addTrialToTables(tables, trial) {
+    const Poker = window.Poker;
+    const ev5 = Poker.eval5i;
+    const handI = tables.handI;
+    const t = tables.n;
+
+    for (let b = 0; b < 2; b++) {
+      const boardCards = b === 0 ? trial.boardA : trial.boardB;
+      for (let i = 0; i < 5; i++) BOARD_[i] = Poker.cardToInt(boardCards[i]);
+      const b0 = BOARD_[0], b1 = BOARD_[1], b2 = BOARD_[2], b3 = BOARD_[3], b4 = BOARD_[4];
+
+      // Playing the board: the floor for any hand that may use fewer than all its cards.
+      const boardOnly = ev5(b0, b1, b2, b3, b4);
+
+      // One of your cards + 4 of the board, best of the 5 ways.
+      for (let c = 0; c < 7; c++) {
+        const h = handI[c];
+        let v = ev5(h, b1, b2, b3, b4);
+        let x = ev5(h, b0, b2, b3, b4); if (x > v) v = x;
+        x = ev5(h, b0, b1, b3, b4); if (x > v) v = x;
+        x = ev5(h, b0, b1, b2, b4); if (x > v) v = x;
+        x = ev5(h, b0, b1, b2, b3); if (x > v) v = x;
+        SINGLE_[c] = v;
+      }
+
+      // Two of your cards + 3 of the board, best of the 10 ways. Every PLO hand in this
+      // game is exactly 2 hole + 3 board, so this table IS the PLO answer for each pair.
+      for (let k = 0; k < TABLE_PAIRS.length; k++) {
+        const hi = handI[TABLE_PAIRS[k][0]];
+        const hj = handI[TABLE_PAIRS[k][1]];
+        let v = -1;
+        for (let q = 0; q < BOARD_SUBSETS_3.length; q++) {
+          const sub = BOARD_SUBSETS_3[q];
+          const x = ev5(hi, hj, BOARD_[sub[0]], BOARD_[sub[1]], BOARD_[sub[2]]);
+          if (x > v) v = x;
+        }
+        PAIR_[k] = v;
+      }
+
+      const oppOne = bestIntFor(trial.oppSplit.one, 'one', boardOnly);
+      const oppTwo = bestIntFor(trial.oppSplit.two, 'two', boardOnly);
+      const oppFour = bestIntFor(trial.oppSplit.four, 'four', boardOnly);
+
+      const base1 = (t * 2 + b) * 7;
+      for (let c = 0; c < 7; c++) {
+        const mine = SINGLE_[c] > boardOnly ? SINGLE_[c] : boardOnly;
+        tables.d1[base1 + c] = mine > oppOne ? PRACTICE_POINTS.one : mine < oppOne ? -PRACTICE_POINTS.one : 0;
+      }
+      const base2 = (t * 2 + b) * TABLE_PAIRS.length;
+      for (let k = 0; k < TABLE_PAIRS.length; k++) {
+        // A 2-card hand is hold'em style: it may use both, one, or neither of its cards.
+        let mine = PAIR_[k] > boardOnly ? PAIR_[k] : boardOnly;
+        const si = SINGLE_[TABLE_PAIRS[k][0]]; if (si > mine) mine = si;
+        const sj = SINGLE_[TABLE_PAIRS[k][1]]; if (sj > mine) mine = sj;
+        tables.d2[base2 + k] = mine > oppTwo ? PRACTICE_POINTS.two : mine < oppTwo ? -PRACTICE_POINTS.two : 0;
+      }
+      const base4 = (t * 2 + b) * TABLE_QUADS.length;
+      for (let q = 0; q < TABLE_QUADS.length; q++) {
+        // A 4-card PLO group's best hand is the best of its 6 two-card pairs.
+        const qp = TABLE_QUAD_PAIRS[q];
+        let mine = PAIR_[qp[0]];
+        for (let x = 1; x < qp.length; x++) if (PAIR_[qp[x]] > mine) mine = PAIR_[qp[x]];
+        tables.d4[base4 + q] = mine > oppFour ? PRACTICE_POINTS.four : mine < oppFour ? -PRACTICE_POINTS.four : 0;
+      }
+    }
+    tables.n++;
+  }
+
+  // The opponent's three hands, on the board currently in BOARD_, as integer strengths.
+  // Same hand rules as the player's: 1-card and 2-card may use fewer than all their cards
+  // (so `boardOnly` is their floor); the 4-card group must use exactly two.
+  function bestIntFor(cards, cat, boardOnly) {
+    const ev5 = window.Poker.eval5i;
+    const ints = OPP_INTS_;
+    for (let i = 0; i < cards.length; i++) ints[i] = window.Poker.cardToInt(cards[i]);
+    let v = cat === 'four' ? -1 : boardOnly;
+
+    if (cat !== 'four') {
+      // each single card + 4 of the board
+      for (let i = 0; i < cards.length; i++) {
+        const h = ints[i];
+        for (let k = 0; k < BOARD_SUBSETS_4.length; k++) {
+          const sub = BOARD_SUBSETS_4[k];
+          const x = ev5(h, BOARD_[sub[0]], BOARD_[sub[1]], BOARD_[sub[2]], BOARD_[sub[3]]);
+          if (x > v) v = x;
+        }
+      }
+    }
+    // every pair of their cards + 3 of the board
+    for (let i = 0; i < cards.length; i++) {
+      for (let j = i + 1; j < cards.length; j++) {
+        for (let q = 0; q < BOARD_SUBSETS_3.length; q++) {
+          const sub = BOARD_SUBSETS_3[q];
+          const x = ev5(ints[i], ints[j], BOARD_[sub[0]], BOARD_[sub[1]], BOARD_[sub[2]]);
+          if (x > v) v = x;
+        }
+      }
+    }
+    return v;
+  }
+  // Turn an arrangement into the three table indices it corresponds to.
+  function assignmentIndices(tables, assignment) {
+    const pos = tables.pos;
+    const i = pos.get(assignment.one[0]);
+    const tw = assignment.two.map((c) => pos.get(c)).sort((a, b) => a - b);
+    const fr = assignment.four.map((c) => pos.get(c)).sort((a, b) => a - b);
+    return { one: i, pair: TABLE_PAIR_AT[tw[0] * 7 + tw[1]], quad: TABLE_QUAD_AT.get(fr.join(',')) };
+  }
+
+  // Score an arrangement from the tables alone. Same return shape as
+  // evalAssignmentAcrossTrials, which this replaces everywhere the tables exist.
+  function evalFromTables(tables, assignment, opts) {
+    const idx = assignmentIndices(tables, assignment);
+    const n = tables.n;
+    const perTrial = opts && opts.keepPerTrial ? new Float64Array(n) : null;
+    const nPairs = TABLE_PAIRS.length;
+    const nQuads = TABLE_QUADS.length;
+    let sumTotal = 0;
+    let sumTotalSq = 0;
+    const sumCells = { one: [0, 0], two: [0, 0], four: [0, 0] };
+    let homerunWins = 0;
+    let homerunLosses = 0;
+
+    for (let t = 0; t < n; t++) {
+      const a1 = tables.d1[(t * 2) * 7 + idx.one];
+      const b1 = tables.d1[(t * 2 + 1) * 7 + idx.one];
+      const a2 = tables.d2[(t * 2) * nPairs + idx.pair];
+      const b2 = tables.d2[(t * 2 + 1) * nPairs + idx.pair];
+      const a4 = tables.d4[(t * 2) * nQuads + idx.quad];
+      const b4 = tables.d4[(t * 2 + 1) * nQuads + idx.quad];
+      let total = a1 + b1 + a2 + b2 + a4 + b4;
+      if (a1 > 0 && b1 > 0 && a2 > 0 && b2 > 0 && a4 > 0 && b4 > 0) { total += PRACTICE_MATCH_TOTAL; homerunWins++; }
+      else if (a1 < 0 && b1 < 0 && a2 < 0 && b2 < 0 && a4 < 0 && b4 < 0) { total -= PRACTICE_MATCH_TOTAL; homerunLosses++; }
+      sumCells.one[0] += a1; sumCells.one[1] += b1;
+      sumCells.two[0] += a2; sumCells.two[1] += b2;
+      sumCells.four[0] += a4; sumCells.four[1] += b4;
+      sumTotal += total;
+      sumTotalSq += total * total;
+      if (perTrial) perTrial[t] = total;
+    }
+
+    const avgCells = {};
+    ['one', 'two', 'four'].forEach((cat) => { avgCells[cat] = [sumCells[cat][0] / n, sumCells[cat][1] / n]; });
+    const avgTotal = sumTotal / n;
+    const varianceTotal = n > 1 ? Math.max(0, (sumTotalSq - n * avgTotal * avgTotal) / (n - 1)) : 0;
+    const sdTotal = Math.sqrt(varianceTotal);
+    return { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal,
+      seTotal: n > 0 ? sdTotal / Math.sqrt(n) : 0, perTrial };
+  }
+
+  // Rank every one of the 105 partitions straight from the tables — this is what makes the
+  // ideal-split search essentially free once the tables are built.
+  function rankPartitionsFromTables(tables) {
+    const hand = tables.hand;
+    const out = [];
+    for (let one = 0; one < 7; one++) {
+      const rest = [0, 1, 2, 3, 4, 5, 6].filter((x) => x !== one);
+      for (let a = 0; a < rest.length; a++) {
+        for (let b = a + 1; b < rest.length; b++) {
+          const quad = rest.filter((x) => x !== rest[a] && x !== rest[b]);
+          const assignment = {
+            one: [hand[one]],
+            two: [hand[rest[a]], hand[rest[b]]],
+            four: quad.map((x) => hand[x])
+          };
+          const r = evalFromTables(tables, assignment);
+          out.push({ assignment, key: fmtAssignmentKey(assignment), ev: r.avgTotal });
+        }
+      }
+    }
+    out.sort((x, y) => y.ev - x.ev);
+    return out;
+  }
+
+  // ---------- precision presets ----------
+  // The user picks a target precision, not a board count. Boards are added until the EV
+  // estimate for the hand actually reaches that standard error, so "±0.05" is a guarantee
+  // per hand rather than an average that swingier hands quietly miss. The cap stops a
+  // pathological hand from running forever.
+  const PRECISION_PRESETS = {
+    standard: { key: 'standard', label: 'Standard', target: 0.05, cap: 30000 },
+    deep: { key: 'deep', label: 'Deep', target: 0.03, cap: 80000 },
+    max: { key: 'max', label: 'Max', target: 0.02, cap: 150000 }
+  };
+  const PRECISION_SEED_BOARDS = 400; // first chunk: something on screen almost immediately
+  const PRECISION_CHUNK = 300;
+  const GROW_SLICE_MS = 12;  // work per slice
+  const GROW_YIELD_MS = 4;   // breathing room for input and repaint between slices
+  let precisionPreset = 'standard';
+  function precision() { return PRECISION_PRESETS[precisionPreset]; }
+
+  // Grows a hand's tables until `reference` (the split whose precision we care about) is
+  // measured to the target standard error, yielding between chunks so the tab stays live.
+  // onProgress fires after every chunk so the panel can show a number that tightens.
+  function growTablesAsync(tables, pool, reference, onProgress) {
+    const target = precision().target;
+    const cap = precision().cap;
+    // The outcome SD barely depends on which split you pick, so the solved pool's own split
+    // for this hand is a perfectly good yardstick for "how many boards is enough" — and it
+    // exists from the first board, before the player has arranged anything. Without it the
+    // loop has nothing to measure and runs all the way to the cap every time.
+    const fallbackRef = tables.fallbackRef || null;
+    return new Promise((resolve) => {
+      function chunk() {
+        const started = Date.now();
+        do {
+          const want = Math.min(PRECISION_CHUNK, cap - tables.n);
+          if (want <= 0) break;
+          const batch = buildPracticeTrials(tables.hand, pool, want);
+          for (let i = 0; i < batch.length; i++) addTrialToTables(tables, batch[i]);
+        } while (tables.n < cap && Date.now() - started < GROW_SLICE_MS);
+
+        const ref = (reference && reference()) || fallbackRef;
+        const se = ref ? evalFromTables(tables, ref).seTotal : Infinity;
+        if (onProgress) onProgress(tables, se);
+        if (tables.n >= cap || (ref && se <= target)) { resolve(tables); return; }
+        // Yield long enough that clicks and repaints get a turn: the player is arranging
+        // cards while this runs, and a solid-CPU loop makes the whole tab feel broken.
+        setTimeout(chunk, GROW_YIELD_MS);
+      }
+      chunk();
+    });
   }
 
   // Runs the current arrangement through all trials — cheap, pure client-side
@@ -1248,11 +1545,7 @@
 
   function fmtEv(n) { return (n > 0 ? '+' : '') + n.toFixed(2); }
 
-  function runPracticeEval() {
-    const result = evalAssignmentAcrossTrials(practice.assignment, practice.trials, practiceHomerunMode, { keepPerTrial: true });
-    practice.lastEv = result;
-    renderPracticeEV(result);
-  }
+  function runPracticeEval() { refreshPracticeEv(); }
 
   function renderPracticeSolvedEv() {
     const node = el('practiceSolvedEv');
@@ -1266,7 +1559,7 @@
 
   function renderPracticeEV(result) {
     const { avgTotal, avgCells, homerunWins, homerunLosses, n, varianceTotal, sdTotal, seTotal } = result;
-    el('practiceTrialCount').textContent = practice.trials.length;
+    el('practiceTrialCount').textContent = result.n.toLocaleString() + (practice.growing ? '+' : '');
     const totalSpan = el('practiceEvTotal');
     totalSpan.textContent = fmtEv(avgTotal);
     totalSpan.className = 'pscore ' + (avgTotal > 0 ? 'pos' : avgTotal < 0 ? 'neg' : '');
@@ -1277,9 +1570,14 @@
     // +/-2*SE of avgTotal, 95% of the time).
     const varLine = el('practiceVarianceLine');
     if (varLine) {
+      const target = precision().target;
+      const hit = seTotal <= target;
       varLine.textContent =
-        `\u{1F4CA} Variance: ${varianceTotal.toFixed(2)} pts² (SD ±${sdTotal.toFixed(2)} pts/hand) ` +
-        `· this EV estimate is accurate to roughly ±${seTotal.toFixed(3)} (1 SE) over ${n.toLocaleString()} boards`;
+        `\u{1F4CA} SD ±${sdTotal.toFixed(2)} pts/hand · this estimate is accurate to ±${seTotal.toFixed(3)} ` +
+        `over ${n.toLocaleString()} boards` +
+        (practice && practice.growing && !hit
+          ? ` · still tightening toward ±${target.toFixed(2)}…`
+          : hit ? ` · at the ${precision().label} target of ±${target.toFixed(2)}` : '');
     }
 
     const breakdown = el('practiceEvBreakdown');
@@ -1312,16 +1610,9 @@
   }
 
   // ---------- practice mode: "Show Ideal Split" ----------
-  // Scores the 105 ways to split the 7 practice cards against the same trial set used
-  // everywhere else in this session, and returns the best one (plus 2 runner-ups). Two
-  // layers of speedup, both benchmarked and verified to produce the same winner as a plain
-  // exhaustive search in the common case: (1) the opponent's evaluation is hoisted out of
-  // the partition loop (it doesn't depend on which partition is being tested) and the
-  // expensive 4-card PLO evaluation is shared across whichever partitions happen to use the
-  // same 4-card subset — ~4x faster on its own; (2) a successive-halving search (see
-  // IDEAL_SEARCH_CHECKPOINTS below) that narrows from 105 partitions down to 10, then 3,
-  // using cheap early checkpoints, so the bulk of a large requested trial count only gets
-  // spent on genuine finalists.
+  // Scores all 105 ways to split the 7 practice cards against the same trial set used
+  // everywhere else in this session, and returns the best (plus 2 runner-ups). The work
+  // happens in scorePartitionsAsync above.
   function allPartitions(cards) {
     const partitions = [];
     const oneCombos = window.Poker.combinations(cards, 1);
@@ -1336,176 +1627,15 @@
     return partitions;
   }
 
-  // Successive-halving search: instead of scoring all 105 partitions against every single
-  // requested board (expensive once the ideal-split slider is set high), narrow the field
-  // down using cheap early checkpoints, the same way you'd play it by hand — 200 boards is
-  // plenty to see which splits are clearly out of contention, 1000 narrows further to the
-  // real finalists, and only those get the rest of the requested trial budget. A partition
-  // that survives a checkpoint keeps its full cumulative score from trial 0 onward (nothing
-  // is re-run) — a partition that gets cut just stops accumulating, its score frozen at
-  // whatever it had at the checkpoint, since it was only needed to decide who gets cut.
-  // Checkpoints past the requested trial count are simply skipped, so at 100-200 boards
-  // this degrades gracefully back to "just run all 105 the whole way," same as before.
+
+  // Scores all 105 partitions and returns the best, plus the two runners-up.
   //
-  // The tradeoff: this is a heuristic, not an exhaustive search anymore. A partition that
-  // gets unlucky in its first 200 boards and falls out of the top 10 is gone for good, even
-  // if it would have pulled ahead given the full trial count. In practice the margin
-  // between the true best split and a split that's merely very good is usually much bigger
-  // than the noise at 200-1000 boards, so this rarely changes the answer — but it's not a
-  // hard guarantee the way scoring all 105 the whole way was.
-  const IDEAL_SEARCH_CHECKPOINTS = [
-    { afterTrials: 200, keep: 10 },
-    { afterTrials: 1000, keep: 3 }
-  ];
-
-  function findIdealSplitAsync(hand, trials, homerunMode, onProgress) {
-    return new Promise((resolve) => {
-      const Poker = window.Poker;
-      const allParts = allPartitions(hand);
-      const totalTrials = trials.length;
-      const checkpoints = IDEAL_SEARCH_CHECKPOINTS.filter((c) => c.afterTrials < totalTrials);
-
-      const totals = new Float64Array(allParts.length);
-      let active = allParts.map((_, i) => i); // indices into allParts/totals still in contention
-      let checkpointIdx = 0;
-      let ti = 0;
-
-      function fourGroupsFor(idxList) {
-        const groups = new Map();
-        idxList.forEach((idx) => {
-          const part = allParts[idx];
-          const key = [...part.four].sort().join(',');
-          if (!groups.has(key)) groups.set(key, { four: part.four, members: [] });
-          groups.get(key).members.push(idx);
-        });
-        return groups;
-      }
-      let fourGroups = fourGroupsFor(active);
-
-      // Rough work-unit estimate (trials x active-partition-count at each stage) purely to
-      // drive the progress bar — later stages process far fewer partitions per trial.
-      let totalWork = 0;
-      {
-        let prevCap = 0;
-        let keepCount = allParts.length;
-        checkpoints.forEach((c) => {
-          totalWork += (c.afterTrials - prevCap) * keepCount;
-          prevCap = c.afterTrials;
-          keepCount = c.keep;
-        });
-        totalWork += (totalTrials - prevCap) * keepCount;
-      }
-      let workDone = 0;
-
-      function currentCap() {
-        return checkpointIdx < checkpoints.length ? checkpoints[checkpointIdx].afterTrials : totalTrials;
-      }
-
-      function scoreRange(start, end) {
-        for (let i = start; i < end; i++) {
-          const trial = trials[i];
-          const oc = {
-            one: [
-              evalHandOnBoard(trial.oppSplit.one, trial.boardA, 'one').score,
-              evalHandOnBoard(trial.oppSplit.one, trial.boardB, 'one').score
-            ],
-            two: [
-              evalHandOnBoard(trial.oppSplit.two, trial.boardA, 'two').score,
-              evalHandOnBoard(trial.oppSplit.two, trial.boardB, 'two').score
-            ],
-            four: [
-              evalHandOnBoard(trial.oppSplit.four, trial.boardA, 'four').score,
-              evalHandOnBoard(trial.oppSplit.four, trial.boardB, 'four').score
-            ]
-          };
-          for (const { four, members } of fourGroups.values()) {
-            const fourA = Poker.bestPLO(four, trial.boardA).score;
-            const fourB = Poker.bestPLO(four, trial.boardB).score;
-            const cmpA = Poker.compareScores(fourA, oc.four[0]);
-            const cmpB = Poker.compareScores(fourB, oc.four[1]);
-            const d4a = cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0;
-            const d4b = cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0;
-            const fourPts = d4a + d4b;
-            for (const idx of members) {
-              const part = allParts[idx];
-              const oneA = Poker.bestGeneric(part.one, trial.boardA).score;
-              const oneB = Poker.bestGeneric(part.one, trial.boardB).score;
-              const twoA = Poker.bestGeneric(part.two, trial.boardA).score;
-              const twoB = Poker.bestGeneric(part.two, trial.boardB).score;
-              const c1a = Poker.compareScores(oneA, oc.one[0]);
-              const c1b = Poker.compareScores(oneB, oc.one[1]);
-              const c2a = Poker.compareScores(twoA, oc.two[0]);
-              const c2b = Poker.compareScores(twoB, oc.two[1]);
-              const d1a = c1a > 0 ? 1 : c1a < 0 ? -1 : 0;
-              const d1b = c1b > 0 ? 1 : c1b < 0 ? -1 : 0;
-              const d2a = c2a > 0 ? 2 : c2a < 0 ? -2 : 0;
-              const d2b = c2b > 0 ? 2 : c2b < 0 ? -2 : 0;
-              let pts = d1a + d1b + d2a + d2b + fourPts;
-              // A split that sets up more clean sweeps can beat a higher-raw-EV split once
-              // the homerun bonus is on, so this has to be part of the search objective
-              // itself, not just applied after the fact to whichever partition wins on raw
-              // points.
-              if (homerunMode) {
-                if (d1a > 0 && d1b > 0 && d2a > 0 && d2b > 0 && d4a > 0 && d4b > 0) pts += PRACTICE_MATCH_TOTAL;
-                else if (d1a < 0 && d1b < 0 && d2a < 0 && d2b < 0 && d4a < 0 && d4b < 0) pts -= PRACTICE_MATCH_TOTAL;
-              }
-              totals[idx] += pts;
-            }
-          }
-        }
-      }
-
-      function step() {
-        const cap = currentCap();
-        // Aim each tick at roughly a fixed amount of work (trials x active partitions), so
-        // ticks stay responsive without wasting time on scheduling overhead once the field
-        // has narrowed and each trial got a lot cheaper to score.
-        const chunkTrials = Math.max(1, Math.min(cap - ti, Math.round(525 / active.length)));
-        const end = Math.min(ti + chunkTrials, cap);
-        if (end > ti) {
-          scoreRange(ti, end);
-          workDone += (end - ti) * active.length;
-          ti = end;
-        }
-
-        if (onProgress) onProgress(Math.min(1, workDone / totalWork));
-
-        if (ti < cap) {
-          setTimeout(step, 0);
-          return;
-        }
-
-        if (checkpointIdx < checkpoints.length) {
-          const keep = checkpoints[checkpointIdx].keep;
-          active = active.slice().sort((a, b) => totals[b] - totals[a]).slice(0, keep);
-          fourGroups = fourGroupsFor(active);
-          checkpointIdx++;
-          setTimeout(step, 0);
-          return;
-        }
-
-        // Rank whatever's still active (could be all 105, if the trial count never hit a
-        // checkpoint, or as few as 3) and keep the top 3 — the winner, plus the next 2
-        // runner-ups shown collapsed in the UI.
-        const ranked = active.slice().sort((a, b) => totals[b] - totals[a]);
-        const top3 = ranked.slice(0, 3).map((idx) => allParts[idx]);
-        const [bestPartition, ...runnerUpPartitions] = top3;
-        // Re-derive the same result shape the rest of the UI expects, via the standard
-        // (single-partition, so cheap) evaluator — guarantees the displayed number matches
-        // exactly what re-running that split manually would show, and fills in the
-        // avgCells/homerun breakdown the fast scoring pass above doesn't track. Same for
-        // each runner-up; only 3 partitions get this treatment, so it's negligible cost.
-        const result = evalAssignmentAcrossTrials(bestPartition, trials, homerunMode);
-        const runnersUp = runnerUpPartitions.map((partition) => ({
-          assignment: partition,
-          ...evalAssignmentAcrossTrials(partition, trials, homerunMode)
-        }));
-        resolve({ assignment: bestPartition, ...result, runnersUp });
-      }
-
-      step();
-    });
-  }
+  // This used to be a successive-halving race — score everything for 200 boards, keep the
+  // top 10, then the top 3 — because a flat search cost `boards x 105` hand evaluations and
+  // took the better part of a minute at high board counts. That made it a heuristic: a
+  // split that got unlucky early was eliminated for good. The table-based scorer removed
+  // the reason for it, so this is now an exact exhaustive search over every partition and
+  // every board, and the answer is the true best of the 105 on the boards you ran.
 
   function renderPracticeIdeal(ideal) {
     const cardsWrap = el('practiceIdealCards');
@@ -1533,11 +1663,7 @@
     // different-sized (if overlapping) trial sets.
     const noteEl = el('practiceIdealTrialNote');
     if (noteEl) {
-      if (ideal.n < practice.trials.length) {
-        noteEl.textContent = `(checked against ${ideal.n.toLocaleString()} of your ${practice.trials.length.toLocaleString()} boards, per the search slider below)`;
-      } else {
-        noteEl.textContent = '(checked against these same boards)';
-      }
+      noteEl.textContent = `(all 105 splits, checked against the same ${ideal.n.toLocaleString()} boards)`;
     }
 
     renderPracticeRunnersUp(ideal.runnersUp || []);
@@ -1601,17 +1727,13 @@
     if (!practice) return;
     if (practice.ideal) { renderPracticeIdeal(practice.ideal); return; }
 
-    const btn = el('btnPracticeIdeal');
-    btn.disabled = true;
-    btn.textContent = 'Calculating… 0%';
-    const idealTrials = practice.trials.length > practiceIdealTrialTarget
-      ? practice.trials.slice(0, practiceIdealTrialTarget)
-      : practice.trials;
-    practice.ideal = await findIdealSplitAsync(practice.hand, idealTrials, practiceHomerunMode, (frac) => {
-      btn.textContent = `Calculating… ${Math.round(frac * 100)}%`;
-    });
-    btn.disabled = false;
-    btn.textContent = 'Show Ideal Split';
+    const ranked = rankPartitionsFromTables(practice.tables);
+    practice.ideal = {
+      assignment: ranked[0].assignment,
+      avgTotal: ranked[0].ev,
+      n: practice.tables.n,
+      runnersUp: ranked.slice(1, 3).map((e) => ({ assignment: e.assignment, avgTotal: e.ev }))
+    };
     renderPracticeIdeal(practice.ideal);
   });
 
@@ -1778,73 +1900,33 @@
     });
   });
 
-  // The slider element itself is a plain linear <input type="range"> — its raw value is
-  // a position (0..PRACTICE_SLIDER_STEPS), not a trial count. Set its bounds/initial
-  // position here (rather than hardcoding a "nice" HTML default attribute) so it stays in
-  // sync with PRACTICE_TRIALS_MIN/MAX/DEFAULT if those ever change.
-  const trialsRangeEl = el('practiceTrialsRange');
-  trialsRangeEl.min = 0;
-  trialsRangeEl.max = PRACTICE_SLIDER_STEPS;
-  trialsRangeEl.step = 1;
-  trialsRangeEl.value = practiceTrialsToSlider(practiceTrialTarget);
-  el('practiceTrialsValue').textContent = practiceTrialTarget.toLocaleString();
-  el('practiceHintTrials').textContent = practiceTrialTarget.toLocaleString();
-
-  trialsRangeEl.addEventListener('input', () => {
-    practiceTrialTarget = practiceSliderToTrials(Number(trialsRangeEl.value));
-    el('practiceTrialsValue').textContent = practiceTrialTarget.toLocaleString();
-    el('practiceHintTrials').textContent = practiceTrialTarget.toLocaleString();
-  });
-
-  // Same log-scale setup, for the separate "Ideal split search boards" slider. Unlike the
-  // EV slider above, changing this doesn't require a New Hand — it just invalidates any
-  // cached ideal-split answer so the next "Show Ideal Split" click recomputes at the new
-  // count.
-  const idealTrialsRangeEl = el('practiceIdealTrialsRange');
-  if (idealTrialsRangeEl) {
-    idealTrialsRangeEl.min = 0;
-    idealTrialsRangeEl.max = PRACTICE_SLIDER_STEPS;
-    idealTrialsRangeEl.step = 1;
-    idealTrialsRangeEl.value = practiceTrialsToSlider(practiceIdealTrialTarget);
-    el('practiceIdealTrialsValue').textContent = practiceIdealTrialTarget.toLocaleString();
-
-    idealTrialsRangeEl.addEventListener('input', () => {
-      practiceIdealTrialTarget = practiceSliderToTrials(Number(idealTrialsRangeEl.value));
-      el('practiceIdealTrialsValue').textContent = practiceIdealTrialTarget.toLocaleString();
-      if (practice) {
-        practice.ideal = null;
-        el('practiceIdealPanel').classList.add('hidden');
-        const idealBtn = el('btnPracticeIdeal');
-        idealBtn.disabled = false;
-        idealBtn.textContent = 'Show Ideal Split';
-      }
+  // ---------- precision control ----------
+  function renderPrecisionUi() {
+    document.querySelectorAll('#precisionRow .precision-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.precision === precisionPreset);
     });
+    const p = PRECISION_PRESETS[precisionPreset];
+    el('precisionNote').textContent =
+      `Boards are added until each hand's EV is measured to ±${p.target.toFixed(2)} points `
+      + `(up to ${p.cap.toLocaleString()}). Applies to the EV panel, the ideal-split search and the drills.`;
   }
 
-  // ---------- shared room state ----------
-  function handleRoomState(room) {
-    state.room = room;
-    if (room.phase === 'lobby') {
-      enterLobby();
-      renderLobby(room);
-    } else if (room.phase === 'arranging') {
-      // Keep the header honest even if a state update lands after the screen was rendered.
-      el('handNumber').textContent = room.handNumber;
-      updateLockStatus();
-    } else if (room.phase === 'results') {
-      if (revealInProgress) return; // don't let a late room_state event show the button mid-reveal
-      const isHost = room.hostId === state.playerId;
-      if (isHost) show('btnNextHand'); else hide('btnNextHand');
-    }
-  }
-
-  // Wire up every "Sort: Dealt / Rank / Suit" control on the page. Each one re-renders
-  // only its own screen — renderGame/renderPracticeArranger are each guarded internally
-  // against running before that screen has real state to show, and since a hidden
-  // screen's buttons can't be clicked (`.hidden` is display:none), the right one always
-  // fires.
-  wireSortControl('gameSortControl', renderGame);
-  wireSortControl('practiceSortControl', renderPracticeArranger);
+  document.querySelectorAll('#precisionRow .precision-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (precisionPreset === btn.dataset.precision) return;
+      precisionPreset = btn.dataset.precision;
+      try { localStorage.setItem('taiwanese-poker-precision', precisionPreset); } catch (e) { /* ignore */ }
+      renderPrecisionUi();
+      // a new target means a new board budget, so restart whatever is on screen
+      if (practiceMode === 'explore') startPractice();
+      else if (rapid && PRACTICE_DRILLS.includes(practiceMode)) { rapid.next = null; rapidNext(); }
+    });
+  });
+  try {
+    const savedPrecision = localStorage.getItem('taiwanese-poker-precision');
+    if (savedPrecision && PRECISION_PRESETS[savedPrecision]) precisionPreset = savedPrecision;
+  } catch (e) { /* ignore */ }
+  renderPrecisionUi();
 
   // ---------- practice: one screen, five modes ----------
   // Explore is the original free-play mode (arrange, see EV, hunt the ideal split, save and
@@ -1992,9 +2074,10 @@
   // The "show live EV" assist (rapid.assist) is a training wheel: it prices each hand as
   // you build it. Hands played with it on are deliberately NOT scored — the whole point of
   // the averages is that they measure unaided judgement.
-  const RAPID_TRIALS = 120; // arrange: boards per hand (105 partitions scored against these)
-  const RAPID_LOCKED_TRIALS = 240; // locked: only 5 completions to score, so afford more boards
-  const RAPID_EST_TRIALS = 240; // estimate: only your own split to price, so afford more boards
+  // Every mode uses the same board count as free play, so a split's EV reads the same
+  // wherever you see it. 120 used to be a speed compromise; the table-based solver below
+  // made it unnecessary — 500 boards now grade faster than 120 did before.
+  const RAPID_SEED_BOARDS = 400;
   // "Close EV is fine": within this of the best split counts as correct. Two splits inside
   // ~0.15 pts/hand are a coin flip at this many boards (well inside the standard error), so
   // insisting on the exact argmax would be grading Monte Carlo noise.
@@ -2049,52 +2132,112 @@
   // partition — but it keeps ALL results instead of just the winner, which is what lets a
   // freely-arranged split be ranked (#k of 105) rather than only compared to the best.
   // Runs in small batches with a yield between them so the tab never freezes.
+  // Score a list of partitions of the SAME seven cards against a fixed trial set, ranked.
+  //
+  // Across the 105 partitions of one hand there are only 7 distinct 1-card hands, 21
+  // distinct 2-card hands and 21 distinct hole PAIRS — and a PLO hand is by definition
+  // exactly 2 hole cards plus 3 board cards, so the best PLO hand for a 4-card group is
+  // just the best of its 6 pairs. So per board we evaluate three small tables once and
+  // every hand any partition could hold becomes a max over a couple of lookups:
+  //   1-card {c}        = max(boardOnly, single[c])
+  //   2-card {a,b}      = max(boardOnly, single[a], single[b], pair[a,b])
+  //   4-card PLO {abcd} = max over its 6 pairs
+  // That's 246 evaluations per board instead of ~5,000. Same approach (and same answers)
+  // as lib/bot.js uses for live bot seats.
   function scorePartitionsAsync(parts, trials, onProgress) {
     return new Promise((resolve) => {
       const Poker = window.Poker;
-      const totals = new Float64Array(parts.length);
-      const groups = new Map();
-      parts.forEach((part, idx) => {
-        const key = [...part.four].sort().join(',');
-        if (!groups.has(key)) groups.set(key, { four: part.four, members: [] });
-        groups.get(key).members.push(idx);
+      const hand = [...parts[0].one, ...parts[0].two, ...parts[0].four];
+      const pos = new Map(hand.map((c, i) => [c, i]));
+
+      const PAIRS = [];
+      const pairAt = [];
+      for (let a = 0; a < 7; a++) for (let b = a + 1; b < 7; b++) { pairAt[a * 7 + b] = pairAt[b * 7 + a] = PAIRS.length; PAIRS.push([a, b]); }
+      const B4 = [];
+      for (let drop = 0; drop < 5; drop++) B4.push([0, 1, 2, 3, 4].filter((x) => x !== drop));
+      const B3 = [];
+      for (let x = 0; x < 5; x++) for (let y = x + 1; y < 5; y++) for (let z = y + 1; z < 5; z++) B3.push([x, y, z]);
+
+      // each partition as index tuples into the tables
+      const specs = parts.map((p) => {
+        const two = p.two.map((c) => pos.get(c));
+        const four = p.four.map((c) => pos.get(c));
+        const quadPairs = [];
+        for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) quadPairs.push(pairAt[four[a] * 7 + four[b]]);
+        return { one: pos.get(p.one[0]), pair: pairAt[two[0] * 7 + two[1]], two, quadPairs };
       });
-      const chunkTrials = Math.max(1, Math.round(525 / Math.max(1, parts.length)));
+
+      const totals = new Float64Array(parts.length);
+      const single = new Array(7);
+      const pair = new Array(PAIRS.length);
+      const d1 = [new Int8Array(7), new Int8Array(7)];
+      const d2 = [new Int8Array(PAIRS.length), new Int8Array(PAIRS.length)];
+      const best = (a, b) => (a === null ? b : b === null ? a : (Poker.compareScores(a, b) >= 0 ? a : b));
       let ti = 0;
 
-      function step() {
-        const end = Math.min(ti + chunkTrials, trials.length);
-        for (let i = ti; i < end; i++) {
-          const trial = trials[i];
-          const oc = {
-            one: [evalHandOnBoard(trial.oppSplit.one, trial.boardA, 'one').score, evalHandOnBoard(trial.oppSplit.one, trial.boardB, 'one').score],
-            two: [evalHandOnBoard(trial.oppSplit.two, trial.boardA, 'two').score, evalHandOnBoard(trial.oppSplit.two, trial.boardB, 'two').score],
-            four: [evalHandOnBoard(trial.oppSplit.four, trial.boardA, 'four').score, evalHandOnBoard(trial.oppSplit.four, trial.boardB, 'four').score]
-          };
-          for (const { four, members } of groups.values()) {
-            const cmpA = Poker.compareScores(Poker.bestPLO(four, trial.boardA).score, oc.four[0]);
-            const cmpB = Poker.compareScores(Poker.bestPLO(four, trial.boardB).score, oc.four[1]);
-            const d4a = cmpA > 0 ? 3 : cmpA < 0 ? -3 : 0;
-            const d4b = cmpB > 0 ? 3 : cmpB < 0 ? -3 : 0;
-            const fourPts = d4a + d4b;
-            for (const idx of members) {
-              const part = parts[idx];
-              const c1a = Poker.compareScores(Poker.bestGeneric(part.one, trial.boardA).score, oc.one[0]);
-              const c1b = Poker.compareScores(Poker.bestGeneric(part.one, trial.boardB).score, oc.one[1]);
-              const c2a = Poker.compareScores(Poker.bestGeneric(part.two, trial.boardA).score, oc.two[0]);
-              const c2b = Poker.compareScores(Poker.bestGeneric(part.two, trial.boardB).score, oc.two[1]);
-              const d1a = c1a > 0 ? 1 : c1a < 0 ? -1 : 0;
-              const d1b = c1b > 0 ? 1 : c1b < 0 ? -1 : 0;
-              const d2a = c2a > 0 ? 2 : c2a < 0 ? -2 : 0;
-              const d2b = c2b > 0 ? 2 : c2b < 0 ? -2 : 0;
-              let pts = d1a + d1b + d2a + d2b + fourPts;
-              if (d1a > 0 && d1b > 0 && d2a > 0 && d2b > 0 && d4a > 0 && d4b > 0) pts += PRACTICE_MATCH_TOTAL;
-              else if (d1a < 0 && d1b < 0 && d2a < 0 && d2b < 0 && d4a < 0 && d4b < 0) pts -= PRACTICE_MATCH_TOTAL;
-              totals[idx] += pts;
+      function scoreTrialFast(trial) {
+        const boards = [trial.boardA, trial.boardB];
+        for (let b = 0; b < 2; b++) {
+          const board = boards[b];
+          const boardOnly = Poker.evaluate5(board);
+          for (let c = 0; c < 7; c++) {
+            let v = null;
+            for (let k = 0; k < B4.length; k++) {
+              const sub = B4[k];
+              v = best(v, Poker.evaluate5([hand[c], board[sub[0]], board[sub[1]], board[sub[2]], board[sub[3]]]));
             }
+            single[c] = v;
+          }
+          for (let k = 0; k < PAIRS.length; k++) {
+            const i = PAIRS[k][0];
+            const j = PAIRS[k][1];
+            let v = null;
+            for (let t = 0; t < B3.length; t++) {
+              const sub = B3[t];
+              v = best(v, Poker.evaluate5([hand[i], hand[j], board[sub[0]], board[sub[1]], board[sub[2]]]));
+            }
+            pair[k] = v;
+          }
+          const oppOne = evalHandOnBoard(trial.oppSplit.one, board, 'one').score;
+          const oppTwo = evalHandOnBoard(trial.oppSplit.two, board, 'two').score;
+          const oppFour = evalHandOnBoard(trial.oppSplit.four, board, 'four').score;
+          for (let c = 0; c < 7; c++) {
+            const cmp = Poker.compareScores(best(boardOnly, single[c]), oppOne);
+            d1[b][c] = cmp > 0 ? 1 : cmp < 0 ? -1 : 0;
+          }
+          for (let k = 0; k < PAIRS.length; k++) {
+            const i = PAIRS[k][0];
+            const j = PAIRS[k][1];
+            const cmp = Poker.compareScores(best(best(boardOnly, best(single[i], single[j])), pair[k]), oppTwo);
+            d2[b][k] = cmp > 0 ? 2 : cmp < 0 ? -2 : 0;
+          }
+          for (let sIdx = 0; sIdx < specs.length; sIdx++) {
+            const qp = specs[sIdx].quadPairs;
+            let v = pair[qp[0]];
+            for (let x = 1; x < qp.length; x++) v = best(v, pair[qp[x]]);
+            const cmp = Poker.compareScores(v, oppFour);
+            specs[sIdx]['d4' + b] = cmp > 0 ? 3 : cmp < 0 ? -3 : 0;
           }
         }
-        ti = end;
+        for (let sIdx = 0; sIdx < specs.length; sIdx++) {
+          const sp = specs[sIdx];
+          const a1 = d1[0][sp.one];
+          const b1 = d1[1][sp.one];
+          const a2 = d2[0][sp.pair];
+          const b2 = d2[1][sp.pair];
+          const a4 = sp.d40;
+          const b4 = sp.d41;
+          let pts = a1 + b1 + a2 + b2 + a4 + b4;
+          if (a1 > 0 && b1 > 0 && a2 > 0 && b2 > 0 && a4 > 0 && b4 > 0) pts += PRACTICE_MATCH_TOTAL;
+          else if (a1 < 0 && b1 < 0 && a2 < 0 && b2 < 0 && a4 < 0 && b4 < 0) pts -= PRACTICE_MATCH_TOTAL;
+          totals[sIdx] += pts;
+        }
+      }
+
+      function step() {
+        // time-sliced so a long search never freezes the tab
+        const started = Date.now();
+        do { scoreTrialFast(trials[ti++]); } while (ti < trials.length && Date.now() - started < 8);
         if (onProgress) onProgress(ti / trials.length);
         if (ti < trials.length) { setTimeout(step, 0); return; }
         const scored = parts.map((assignment, idx) => ({
@@ -2107,38 +2250,6 @@
       }
       step();
     });
-  }
-
-  // The opponent's evaluations don't depend on how YOU split, so cache them once per hand.
-  // That's what makes pricing a single hand-group cheap enough to redo on every card
-  // placement for the live-EV assist.
-  function ensureOppCache(quiz) {
-    if (!quiz.oppCache) {
-      quiz.oppCache = quiz.trials.map((t) => ({
-        one: [evalHandOnBoard(t.oppSplit.one, t.boardA, 'one').score, evalHandOnBoard(t.oppSplit.one, t.boardB, 'one').score],
-        two: [evalHandOnBoard(t.oppSplit.two, t.boardA, 'two').score, evalHandOnBoard(t.oppSplit.two, t.boardB, 'two').score],
-        four: [evalHandOnBoard(t.oppSplit.four, t.boardA, 'four').score, evalHandOnBoard(t.oppSplit.four, t.boardB, 'four').score]
-      }));
-    }
-    return quiz.oppCache;
-  }
-
-  // Average points this one hand-group wins or loses per hand played, across both boards.
-  // Each category is compared only against the opponent's same category, so a group can be
-  // priced on its own without the rest of the split being decided.
-  function categoryEv(cards, cat, quiz) {
-    const cache = ensureOppCache(quiz);
-    const pts = PRACTICE_POINTS[cat];
-    let total = 0;
-    for (let i = 0; i < quiz.trials.length; i++) {
-      const t = quiz.trials[i];
-      const boards = [t.boardA, t.boardB];
-      for (let b = 0; b < 2; b++) {
-        const cmp = window.Poker.compareScores(evalHandOnBoard(cards, boards[b], cat).score, cache[i][cat][b]);
-        total += cmp > 0 ? pts : cmp < 0 ? -pts : 0;
-      }
-    }
-    return total / quiz.trials.length;
   }
 
   // Per-hand EV of a complete split, plus the homerun bonus broken out. The bonus can't be
@@ -2164,14 +2275,27 @@
     return { assignment: { one: [], two: [], four: [] }, selected: null, placeOrder: [] };
   }
 
+  // Every drill builds the same kind of table set the EV panel uses, to the same precision
+  // target. Ranking all 105 splits off the finished tables costs milliseconds, so the drill
+  // can grade against tens of thousands of boards without the player waiting on it.
+  // `seedSplit` is the solved pool's own split for this hand: the yardstick the growth loop
+  // measures its standard error against before the player has arranged anything.
+  async function buildDrillTables(hand, pool, seedSplit, reference) {
+    const tables = newTables(hand, precision().cap, seedSplit);
+    const seed = buildPracticeTrials(hand, pool, RAPID_SEED_BOARDS);
+    for (let i = 0; i < seed.length; i++) addTrialToTables(tables, seed[i]);
+    await growTablesAsync(tables, pool, reference || (() => null));
+    return tables;
+  }
+
   async function buildArrangeQuiz() {
     const pool = await loadOpponentPool();
-    const { hand } = rapidSeedHand(pool);
-    const trials = buildPracticeTrials(hand, pool, RAPID_TRIALS);
-    const quiz = Object.assign({ mode: 'arrange', hand, trials, solved: null, answered: false }, emptyArrangeFields());
-    // Solve in the background while the player arranges — by the time anyone has placed
-    // seven cards, the full 105-partition answer is already waiting.
-    quiz.solvePromise = scorePartitionsAsync(allPartitions(hand), trials).then((s) => { quiz.solved = s; return s; });
+    const { seed, hand } = rapidSeedHand(pool);
+    const quiz = Object.assign({ mode: 'arrange', hand, solved: null, answered: false }, emptyArrangeFields());
+    // Built in the background while the player arranges; by the time seven cards are placed
+    // the full 105-partition answer is already waiting.
+    quiz.solvePromise = buildDrillTables(hand, pool, seed, () => quiz.assignment.four.length === 4 ? quiz.assignment : null)
+      .then((tables) => { quiz.tables = tables; quiz.solved = rankPartitionsFromTables(tables); return quiz.solved; });
     return quiz;
   }
 
@@ -2180,23 +2304,31 @@
   // worth, which is only known once you've built it.
   async function buildEstimateQuiz() {
     const pool = await loadOpponentPool();
-    const { hand } = rapidSeedHand(pool);
-    const trials = buildPracticeTrials(hand, pool, RAPID_EST_TRIALS);
-    return Object.assign({
-      mode: 'estimate', hand, trials, answered: false,
+    const { seed, hand } = rapidSeedHand(pool);
+    const quiz = Object.assign({
+      mode: 'estimate', hand, answered: false,
       guesses: { one: null, two: null, four: null }, result: null, breakdown: null
     }, emptyArrangeFields());
+    quiz.solvePromise = buildDrillTables(hand, pool, seed, () => quiz.assignment.four.length === 4 ? quiz.assignment : null)
+      .then((tables) => { quiz.tables = tables; return tables; });
+    return quiz;
   }
 
   async function buildLockedQuiz() {
     const pool = await loadOpponentPool();
     const { seed, hand } = rapidSeedHand(pool);
-    const trials = buildPracticeTrials(hand, pool, RAPID_LOCKED_TRIALS);
     const lockedTwo = [...seed.two]; // the solver's own NLH hand for this holding
     const rest = hand.filter((c) => !lockedTwo.includes(c));
     const parts = rest.map((c) => ({ one: [c], two: lockedTwo, four: rest.filter((x) => x !== c) }));
-    const quiz = { mode: 'locked', hand, trials, lockedTwo, rest, parts, solved: null, answered: false, chosenCard: null };
-    quiz.solvePromise = scorePartitionsAsync(parts, trials).then((s) => { quiz.solved = s; return s; });
+    const quiz = { mode: 'locked', hand, lockedTwo, rest, parts, solved: null, answered: false, chosenCard: null };
+    quiz.solvePromise = buildDrillTables(hand, pool, parts[0], () => parts[0])
+      .then((tables) => {
+        quiz.tables = tables;
+        quiz.solved = parts.map((assignment) => ({
+          assignment, key: fmtAssignmentKey(assignment), ev: evalFromTables(tables, assignment).avgTotal
+        })).sort((a, b) => b.ev - a.ev);
+        return quiz.solved;
+      });
     return quiz;
   }
 
@@ -2391,7 +2523,7 @@
   function renderRapidLiveEv() {
     const quiz = rapidActiveQuiz();
     const panel = el('rapidLiveEv');
-    if (!rapid.assist || !rapidUsesArranger(quiz) || quiz.answered) {
+    if (!rapid.assist || !rapidUsesArranger(quiz) || quiz.answered || !quiz.tables) {
       panel.classList.add('hidden');
       return;
     }
@@ -2400,11 +2532,22 @@
     let homerun = null;
     let total = null;
     if (complete) {
-      const b = splitEvBreakdown(evalAssignmentAcrossTrials(quiz.assignment, quiz.trials, practiceHomerunMode));
+      const b = splitEvBreakdown(evalFromTables(quiz.tables, quiz.assignment));
       cats = b.cats; homerun = b.homerun; total = b.total;
     } else {
+      // Partial splits: fill the unplaced groups with any spare cards just to get a legal
+      // lookup, then read only the categories the player has actually completed.
+      const used = new Set([...quiz.assignment.one, ...quiz.assignment.two, ...quiz.assignment.four]);
+      const spare = quiz.hand.filter((c) => !used.has(c));
+      let si = 0;
+      const probe = {
+        one: quiz.assignment.one.length === 1 ? quiz.assignment.one : [spare[si++]],
+        two: quiz.assignment.two.length === 2 ? quiz.assignment.two : [spare[si++], spare[si++]],
+        four: quiz.assignment.four.length === 4 ? quiz.assignment.four : [spare[si++], spare[si++], spare[si++], spare[si++]]
+      };
+      const probed = splitEvBreakdown(evalFromTables(quiz.tables, probe));
       RAPID_CATS.forEach((cat) => {
-        cats[cat] = quiz.assignment[cat].length === CAPACITY[cat] ? categoryEv(quiz.assignment[cat], cat, quiz) : null;
+        cats[cat] = quiz.assignment[cat].length === CAPACITY[cat] ? probed.cats[cat] : null;
       });
     }
     const cell = (v) => v === null
@@ -2613,7 +2756,7 @@
         if (quiz.mode !== 'estimate') {
           rapid.mistakeSeq++;
           rapid.mistakes.push(Object.assign({
-            id: rapid.mistakeSeq, mode: quiz.mode, hand: quiz.hand, trials: quiz.trials,
+            id: rapid.mistakeSeq, mode: quiz.mode, hand: quiz.hand, tables: quiz.tables,
             solved: quiz.solved, loss, tier, attempts: 0, resolved: false
           }, extra));
         }
@@ -2680,7 +2823,8 @@
 
     quiz.answered = true;
     quiz.guesses = guesses;
-    quiz.result = evalAssignmentAcrossTrials(quiz.assignment, quiz.trials, practiceHomerunMode);
+    if (!quiz.tables) await quiz.solvePromise;
+    quiz.result = evalFromTables(quiz.tables, quiz.assignment);
     quiz.breakdown = splitEvBreakdown(quiz.result);
 
     // Graded on how well the three estimates price the hand as a whole; the per-hand errors
@@ -2870,7 +3014,7 @@
   function startRapidRetry(mistakeId) {
     const m = rapid.mistakes.find((x) => x.id === mistakeId);
     if (!m) return;
-    const base = { hand: m.hand, trials: m.trials, solved: m.solved, solvePromise: Promise.resolve(m.solved),
+    const base = { hand: m.hand, tables: m.tables, solved: m.solved, solvePromise: Promise.resolve(m.solved),
       answered: false, assisted: false };
     const quiz = m.mode === 'locked'
       ? Object.assign({ mode: 'locked', lockedTwo: m.lockedTwo, rest: m.rest, parts: m.parts, chosenCard: null }, base)
@@ -2920,6 +3064,11 @@
     el('rapidEst' + capitalize(cat)).addEventListener('input', renderRapidEstTotal);
   });
 
+  // Each sort control re-renders only its own screen — renderGame/renderPracticeArranger are
+  // each guarded internally against running before that screen has real state, and a hidden
+  // screen's buttons can't be clicked, so the right one always fires.
+  wireSortControl('gameSortControl', renderGame);
+  wireSortControl('practiceSortControl', renderPracticeArranger);
   wireSortControl('rapidSortControl', () => { if (rapid && rapid.view === 'drill') renderRapidDrill(); });
 
   document.addEventListener('keydown', (ev) => {
@@ -2964,6 +3113,14 @@
       renderRapidDrill();
     }
   });
+
+  // Exposed for the equivalence test. The delta tables are an optimization over the plain
+  // per-trial scorer below them, so a test has to be able to prove the two agree exactly.
+  window.__practiceInternals = {
+    newTables, addTrialToTables, evalFromTables, rankPartitionsFromTables,
+    evalAssignmentAcrossTrials, scorePartitionsAsync, buildPracticeTrials, allPartitions,
+    PRECISION_PRESETS, precision: () => precision()
+  };
 
   // ---------- boot / rejoin ----------
   const params = new URLSearchParams(location.search);
